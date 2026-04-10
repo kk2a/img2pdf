@@ -62,8 +62,9 @@ struct AppState {
 impl AppState {
     fn new() -> Self {
         let config = AppConfig::new().unwrap_or_else(|_| {
-            // 設定ファイルが開けない場合はデフォルト値で起動
-            AppConfig::new().expect("Failed to initialize AppConfig")
+            // 設定ファイルが読み込めない場合はメモリ上のデフォルト値で起動
+            // AppConfig には必ず valid な状態を持たせる
+            AppConfig::default()
         });
         let canvas_width = DEFAULT_WIDTH;
         AppState {

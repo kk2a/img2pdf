@@ -31,9 +31,6 @@ rayon = "1.7"
 anyhow = "1.0"
 thiserror = "1.0"
 
-# CPU数
-num_cpus = "1.16"
-
 [profile.release]
 opt-level = 3
 lto = true

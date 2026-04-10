@@ -9,6 +9,16 @@ pub struct AppConfig {
     data: Config,
 }
 
+impl Default for AppConfig {
+    /// 設定ファイルが利用できない場合のフォールバック（メモリ上のみ）
+    fn default() -> Self {
+        AppConfig {
+            config_path: PathBuf::new(),
+            data: Config::default(),
+        }
+    }
+}
+
 impl AppConfig {
     /// 設定を読み込んで新しい AppConfig を生成する
     pub fn new() -> Result<Self> {
