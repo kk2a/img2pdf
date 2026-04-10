@@ -92,8 +92,7 @@ mod tests {
     }
 
     // ─── jpegtran 最小疎通 ─────────────────────────────────────────────
-    // A-1 (JPEG 可逆最適化) は却下済みのため、jpegtran を使用した最適化は削除された。
-    // このテストは参考として保持するが、jpegtran バイナリが配置されていない場合はスキップする。
+    // jpegtran バイナリが配置されていない場合はスキップする。
 
     fn find_jpegtran() -> Option<PathBuf> {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
