@@ -226,11 +226,12 @@ impl ImageProcessor {
             });
         }
 
+        let success_count = success_pages.len();
         // PDF 生成（JPEG バイトはすでに並列フェーズで揃っている）
-        match Self::generate_pdf(&success_pages, &output_path, canvas_width) {
+        match Self::generate_pdf(success_pages, &output_path, canvas_width) {
             Ok(()) => ProcessingResult {
                 success: true,
-                success_count: success_pages.len(),
+                success_count,
                 error_count: errors.len(),
                 errors,
                 output_path,
@@ -434,12 +435,13 @@ mod tests {
         let path_str = tmp.to_string_lossy().to_string();
 
         // 小さめのテスト画像 (200x283 ≈ A4比率)
-        let page = make_jpeg_page(200, 283, [240, 240, 240]);
-        let raw_rgb_size = (page.width * page.height * 3) as u64;
-        ImageProcessor::generate_pdf(&[page], &path_str, 200)
+        let (page_w, page_h) = (200u32, 283u32);
+        let page = make_jpeg_page(page_w, page_h, [240, 240, 240]);
+        ImageProcessor::generate_pdf(vec![page], &path_str, page_w)
             .expect("PDF generation failed");
 
         let pdf_size = std::fs::metadata(&tmp).unwrap().len();
+        let raw_rgb_size = (page_w as u64 * page_h as u64 * 3) as u64;
 
         // PDF は生 RGB より大幅に小さい（JPEG 圧縮が効いている）
         assert!(
@@ -468,7 +470,7 @@ mod tests {
             make_jpeg_page(200, 283, [0, 255, 0]),
             make_jpeg_page(200, 283, [0, 0, 255]),
         ];
-        ImageProcessor::generate_pdf(&pages, &path_str, 200)
+        ImageProcessor::generate_pdf(pages, &path_str, 200)
             .expect("PDF generation failed");
 
         let content = std::fs::read(&tmp).unwrap();
