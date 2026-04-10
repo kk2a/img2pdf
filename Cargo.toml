@@ -3,4 +3,38 @@ name = "img2pdf"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "img2pdf"
+path = "src/main.rs"
+
 [dependencies]
+# 画像処理
+image = "0.24"
+
+# PDF生成
+printpdf = { version = "0.7", features = ["embedded_images"] }
+
+# GUI
+fltk = { version = "1.4", features = ["fltk-bundled"] }
+
+# JSON設定
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+# クロスプラットフォーム ディレクトリ
+dirs = "5.0"
+
+# 並列処理
+rayon = "1.7"
+
+# エラーハンドリング
+anyhow = "1.0"
+thiserror = "1.0"
+
+# CPU数
+num_cpus = "1.16"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,3 +1,5 @@
+use img2pdf::gui;
+
 fn main() {
-    println!("Hello, world!");
+    gui::run();
 }
