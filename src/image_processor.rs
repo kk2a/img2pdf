@@ -272,6 +272,9 @@ impl ImageProcessor {
             .unwrap_or_else(|_| "lanczos3".to_string());
         eprintln!("[img2pdf] resize_filter={filter_name} ({filter:?})");
 
+        // C-1: 使用する PDF バックエンドをログに記録（比較実験用）
+        eprintln!("[img2pdf] pdf_backend={}", Self::pdf_backend());
+
         // 進捗カウンター: Mutex を使わず AtomicUsize でロックフリーに管理
         let counter = Arc::new(AtomicUsize::new(0));
 
@@ -368,12 +371,38 @@ impl ImageProcessor {
         }
     }
 
+    /// C-1: 環境変数 `IMG2PDF_PDF_BACKEND` から PDF バックエンドを取得する
+    ///
+    /// 有効な値: `printpdf`（デフォルト）, `pdfwriter`
+    /// 比較実験時は環境変数を切り替えることで簡単にバックエンドを変更できる。
+    pub fn pdf_backend() -> &'static str {
+        match std::env::var("IMG2PDF_PDF_BACKEND")
+            .as_deref()
+            .unwrap_or("printpdf")
+        {
+            "pdfwriter" => "pdfwriter",
+            _ => "printpdf",
+        }
+    }
+
     /// JPEG エンコード済みページ群から PDF ファイルを生成する
     ///
     /// JPEG バイトはすでに並列処理フェーズで生成済みであり、
     /// このフェーズでは再エンコードを行わない。
     /// DPI は `canvas_width` から自動計算される。
     pub fn generate_pdf(
+        pages: Vec<JpegPage>,
+        output_path: &str,
+        canvas_width: u32,
+    ) -> Result<(), String> {
+        match Self::pdf_backend() {
+            "pdfwriter" => Self::generate_pdf_pdfwriter(pages, output_path, canvas_width),
+            _ => Self::generate_pdf_printpdf(pages, output_path, canvas_width),
+        }
+    }
+
+    /// printpdf バックエンドで PDF を生成する（デフォルト）
+    fn generate_pdf_printpdf(
         pages: Vec<JpegPage>,
         output_path: &str,
         canvas_width: u32,
@@ -441,6 +470,96 @@ impl ImageProcessor {
         let file = File::create(output_path).map_err(|e| e.to_string())?;
         doc.save(&mut BufWriter::new(file))
             .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    /// C-1: pdf-writer バックエンドで PDF を生成する（比較実験用）
+    ///
+    /// - `printpdf` より低レベルな直接書き出しで、速度比較に使う
+    /// - 出力内容は printpdf バックエンドと同等（JPEG を DCTDecode で埋め込む）
+    /// - `canvas_width` は DPI 計算には使わない（pdf-writer では pt 単位で直接指定するため）
+    fn generate_pdf_pdfwriter(
+        pages: Vec<JpegPage>,
+        output_path: &str,
+        _canvas_width: u32,
+    ) -> Result<(), String> {
+        use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref};
+        use std::fs;
+
+        if pages.is_empty() {
+            return Err("No images to process".to_string());
+        }
+
+        // A4 サイズ（pt）: 1pt = 1/72 inch
+        const A4_W: f32 = 595.28;
+        const A4_H: f32 = 841.89;
+
+        let mut pdf = Pdf::new();
+        let total = pages.len();
+
+        // オブジェクト ID の割り当て:
+        //   1: catalog
+        //   2: page tree
+        //   3..3+total-1: page
+        //   3+total..3+2*total-1: image XObject
+        //   3+2*total..3+3*total-1: content stream
+        let catalog_id = Ref::new(1);
+        let page_tree_id = Ref::new(2);
+        let base = 3_i32;
+        let page_ids: Vec<Ref> = (0..total)
+            .map(|i| Ref::new(base + i as i32))
+            .collect();
+        let image_ids: Vec<Ref> = (0..total)
+            .map(|i| Ref::new(base + total as i32 + i as i32))
+            .collect();
+        let content_ids: Vec<Ref> = (0..total)
+            .map(|i| Ref::new(base + 2 * total as i32 + i as i32))
+            .collect();
+
+        // catalog → page tree
+        pdf.catalog(catalog_id).pages(page_tree_id);
+
+        // page tree
+        pdf.pages(page_tree_id)
+            .kids(page_ids.iter().copied())
+            .count(total as i32);
+
+        // 各ページを書き出す
+        let image_name = Name(b"Im0");
+        for (i, page) in pages.into_iter().enumerate() {
+            // ページ定義
+            let mut pdf_page = pdf.page(page_ids[i]);
+            pdf_page.media_box(Rect::new(0.0, 0.0, A4_W, A4_H));
+            pdf_page.parent(page_tree_id);
+            pdf_page.contents(content_ids[i]);
+            pdf_page
+                .resources()
+                .x_objects()
+                .pair(image_name, image_ids[i]);
+            pdf_page.finish();
+
+            // 画像 XObject（JPEG バイトをそのまま DCTDecode で埋め込む）
+            let mut img = pdf.image_xobject(image_ids[i], &page.data);
+            img.filter(Filter::DctDecode);
+            img.width(page.width as i32);
+            img.height(page.height as i32);
+            img.color_space().device_rgb();
+            img.bits_per_component(8);
+            img.finish();
+
+            // コンテンツストリーム: 画像をページ全体に配置
+            // PDF 座標系は左下原点。XObject は 1×1 なので A4 サイズにスケール。
+            let mut content = Content::new();
+            content.save_state();
+            content.transform([A4_W, 0.0, 0.0, A4_H, 0.0, 0.0]);
+            content.x_object(image_name);
+            content.restore_state();
+            pdf.stream(content_ids[i], &content.finish());
+        }
+
+        let bytes = pdf.finish();
+        fs::write(output_path, &bytes).map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -661,5 +780,47 @@ mod tests {
             );
         }
         unsafe { std::env::remove_var("IMG2PDF_RESIZE_FILTER") };
+    }
+
+    /// C-1: pdf_backend がデフォルトで printpdf を返すことを確認
+    #[test]
+    fn test_pdf_backend_default_is_printpdf() {
+        unsafe { std::env::remove_var("IMG2PDF_PDF_BACKEND") };
+        assert_eq!(ImageProcessor::pdf_backend(), "printpdf");
+    }
+
+    /// C-1: 環境変数 IMG2PDF_PDF_BACKEND で pdfwriter に切り替えられることを確認
+    #[test]
+    fn test_pdf_backend_from_env() {
+        unsafe { std::env::set_var("IMG2PDF_PDF_BACKEND", "pdfwriter") };
+        assert_eq!(ImageProcessor::pdf_backend(), "pdfwriter");
+
+        // 未知の値はデフォルト (printpdf) にフォールバック
+        unsafe { std::env::set_var("IMG2PDF_PDF_BACKEND", "unknown") };
+        assert_eq!(ImageProcessor::pdf_backend(), "printpdf");
+
+        unsafe { std::env::remove_var("IMG2PDF_PDF_BACKEND") };
+    }
+
+    /// C-1: pdfwriter バックエンドが有効な PDF を生成することを確認
+    #[test]
+    fn test_generate_pdf_pdfwriter_backend() {
+        let tmp = std::env::temp_dir().join("img2pdf_test_pdfwriter.pdf");
+        let path_str = tmp.to_string_lossy().to_string();
+
+        unsafe { std::env::set_var("IMG2PDF_PDF_BACKEND", "pdfwriter") };
+        let page = make_jpeg_page(200, 283, [200, 200, 200]);
+        ImageProcessor::generate_pdf(vec![page], &path_str, 200)
+            .expect("pdfwriter PDF generation failed");
+        unsafe { std::env::remove_var("IMG2PDF_PDF_BACKEND") };
+
+        let content = std::fs::read(&tmp).unwrap();
+        assert!(
+            content.starts_with(b"%PDF"),
+            "pdfwriter output should start with %PDF"
+        );
+        assert!(!content.is_empty(), "pdfwriter output should not be empty");
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }
