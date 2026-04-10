@@ -207,7 +207,7 @@ impl ImageProcessor {
                     let safe_total = total.max(1);
                     let prev_pct = (count - 1) * 100 / safe_total;
                     let curr_pct = count * 100 / safe_total;
-                    if curr_pct != prev_pct || count == total {
+                    if curr_pct != prev_pct || count == 1 || count == total {
                         let _ = tx.send(ProgressUpdate {
                             count,
                             total,
