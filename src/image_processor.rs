@@ -137,23 +137,6 @@ impl ImageProcessor {
         }
     }
 
-    /// B-1: 環境変数 `IMG2PDF_RESIZE_FILTER` からリサイズフィルタを取得する
-    ///
-    /// 有効な値: `lanczos3`（デフォルト）, `triangle`, `catmullrom`, `gaussian`, `nearest`
-    /// 比較実験時は環境変数を切り替えることで簡単にフィルタを変更できる。
-    pub fn resize_filter() -> image::imageops::FilterType {
-        match std::env::var("IMG2PDF_RESIZE_FILTER")
-            .as_deref()
-            .unwrap_or("lanczos3")
-        {
-            "nearest" => image::imageops::FilterType::Nearest,
-            "triangle" => image::imageops::FilterType::Triangle,
-            "catmullrom" => image::imageops::FilterType::CatmullRom,
-            "gaussian" => image::imageops::FilterType::Gaussian,
-            _ => image::imageops::FilterType::Lanczos3,
-        }
-    }
-
     /// 単一の JPEG 画像を読み込み、A4 キャンバスに中央配置して返す
     ///
     /// 処理フロー:
@@ -188,7 +171,7 @@ impl ImageProcessor {
             &img_rgb,
             new_w,
             new_h,
-            Self::resize_filter(),
+            image::imageops::FilterType::Lanczos3,
         );
 
         // 4. 白色キャンバスに中央配置
@@ -265,15 +248,6 @@ impl ImageProcessor {
     ) -> ProcessingResult {
         let canvas_height = Self::calculate_height(canvas_width);
         let total = file_list.len();
-
-        // B-1: 使用するリサイズフィルタをログに記録（比較実験用）
-        let filter = Self::resize_filter();
-        let filter_name = std::env::var("IMG2PDF_RESIZE_FILTER")
-            .unwrap_or_else(|_| "lanczos3".to_string());
-        eprintln!("[img2pdf] resize_filter={filter_name} ({filter:?})");
-
-        // C-1: 使用する PDF バックエンドをログに記録（比較実験用）
-        eprintln!("[img2pdf] pdf_backend={}", Self::pdf_backend());
 
         // 進捗カウンター: Mutex を使わず AtomicUsize でロックフリーに管理
         let counter = Arc::new(AtomicUsize::new(0));
@@ -371,115 +345,12 @@ impl ImageProcessor {
         }
     }
 
-    /// C-1: 環境変数 `IMG2PDF_PDF_BACKEND` から PDF バックエンドを取得する
-    ///
-    /// 有効な値: `printpdf`（デフォルト）, `pdfwriter`
-    /// 比較実験時は環境変数を切り替えることで簡単にバックエンドを変更できる。
-    pub fn pdf_backend() -> &'static str {
-        match std::env::var("IMG2PDF_PDF_BACKEND")
-            .as_deref()
-            .unwrap_or("printpdf")
-        {
-            "pdfwriter" => "pdfwriter",
-            _ => "printpdf",
-        }
-    }
-
     /// JPEG エンコード済みページ群から PDF ファイルを生成する
     ///
     /// JPEG バイトはすでに並列処理フェーズで生成済みであり、
     /// このフェーズでは再エンコードを行わない。
-    /// DPI は `canvas_width` から自動計算される。
+    /// pdf-writer を使用して直接 PDF バイト列を構築し書き出す。
     pub fn generate_pdf(
-        pages: Vec<JpegPage>,
-        output_path: &str,
-        canvas_width: u32,
-    ) -> Result<(), String> {
-        match Self::pdf_backend() {
-            "pdfwriter" => Self::generate_pdf_pdfwriter(pages, output_path, canvas_width),
-            _ => Self::generate_pdf_printpdf(pages, output_path, canvas_width),
-        }
-    }
-
-    /// printpdf バックエンドで PDF を生成する（デフォルト）
-    fn generate_pdf_printpdf(
-        pages: Vec<JpegPage>,
-        output_path: &str,
-        canvas_width: u32,
-    ) -> Result<(), String> {
-        use printpdf::*;
-        use std::fs::File;
-        use std::io::BufWriter;
-
-        if pages.is_empty() {
-            return Err("No images to process".to_string());
-        }
-
-        // A4 サイズ（mm）
-        let a4_width_mm = 210.0_f32;
-        let a4_height_mm = 297.0_f32;
-
-        // canvas_width が A4 幅に対応する DPI を計算
-        // dpi = canvas_width / (a4_width_mm / 25.4)
-        let dpi = canvas_width as f32 * 25.4 / a4_width_mm;
-
-        let (doc, first_page, first_layer) = PdfDocument::new(
-            APP_NAME,
-            Mm(a4_width_mm),
-            Mm(a4_height_mm),
-            "Layer 1",
-        );
-
-        for (page_idx, page) in pages.into_iter().enumerate() {
-            let (current_page, current_layer) = if page_idx == 0 {
-                (first_page, first_layer)
-            } else {
-                doc.add_page(Mm(a4_width_mm), Mm(a4_height_mm), "Layer 1")
-            };
-
-            let layer = doc.get_page(current_page).get_layer(current_layer);
-
-            // 並列フェーズで生成済みの JPEG バイトを直接使用（再エンコードなし）
-            let pdf_image = Image {
-                image: ImageXObject {
-                    width: Px(page.width as usize),
-                    height: Px(page.height as usize),
-                    color_space: ColorSpace::Rgb,
-                    bits_per_component: ColorBits::Bit8,
-                    interpolate: true,
-                    image_data: page.data,
-                    image_filter: Some(ImageFilter::DCT),
-                    smask: None,
-                    clipping_bbox: None,
-                },
-            };
-
-            pdf_image.add_to_layer(
-                layer,
-                ImageTransform {
-                    translate_x: Some(Mm(0.0)),
-                    translate_y: Some(Mm(0.0)),
-                    rotate: None,
-                    scale_x: None,
-                    scale_y: None,
-                    dpi: Some(dpi),
-                },
-            );
-        }
-
-        let file = File::create(output_path).map_err(|e| e.to_string())?;
-        doc.save(&mut BufWriter::new(file))
-            .map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
-
-    /// C-1: pdf-writer バックエンドで PDF を生成する（比較実験用）
-    ///
-    /// - `printpdf` より低レベルな直接書き出しで、速度比較に使う
-    /// - 出力内容は printpdf バックエンドと同等（JPEG を DCTDecode で埋め込む）
-    /// - `canvas_width` は DPI 計算には使わない（pdf-writer では pt 単位で直接指定するため）
-    fn generate_pdf_pdfwriter(
         pages: Vec<JpegPage>,
         output_path: &str,
         _canvas_width: u32,
@@ -746,81 +617,5 @@ mod tests {
             n,
             "Atomic counter should equal {n} after {n} increments"
         );
-    }
-
-    /// B-1: resize_filter がデフォルトで Lanczos3 を返し、環境変数で変更できることを確認
-    #[test]
-    fn test_resize_filter_default_is_lanczos3() {
-        // 環境変数が未設定の場合は Lanczos3
-        unsafe { std::env::remove_var("IMG2PDF_RESIZE_FILTER") };
-        let f = ImageProcessor::resize_filter();
-        assert!(
-            matches!(f, image::imageops::FilterType::Lanczos3),
-            "Default filter should be Lanczos3"
-        );
-    }
-
-    /// B-1: 環境変数 IMG2PDF_RESIZE_FILTER で各フィルタに切り替えられることを確認
-    #[test]
-    fn test_resize_filter_from_env() {
-        let cases = [
-            ("nearest", image::imageops::FilterType::Nearest),
-            ("triangle", image::imageops::FilterType::Triangle),
-            ("catmullrom", image::imageops::FilterType::CatmullRom),
-            ("gaussian", image::imageops::FilterType::Gaussian),
-            ("lanczos3", image::imageops::FilterType::Lanczos3),
-            ("unknown_value", image::imageops::FilterType::Lanczos3),
-        ];
-        for (name, expected) in cases {
-            unsafe { std::env::set_var("IMG2PDF_RESIZE_FILTER", name) };
-            let f = ImageProcessor::resize_filter();
-            assert!(
-                std::mem::discriminant(&f) == std::mem::discriminant(&expected),
-                "Filter for '{name}' should match expected variant"
-            );
-        }
-        unsafe { std::env::remove_var("IMG2PDF_RESIZE_FILTER") };
-    }
-
-    /// C-1: pdf_backend がデフォルトで printpdf を返すことを確認
-    #[test]
-    fn test_pdf_backend_default_is_printpdf() {
-        unsafe { std::env::remove_var("IMG2PDF_PDF_BACKEND") };
-        assert_eq!(ImageProcessor::pdf_backend(), "printpdf");
-    }
-
-    /// C-1: 環境変数 IMG2PDF_PDF_BACKEND で pdfwriter に切り替えられることを確認
-    #[test]
-    fn test_pdf_backend_from_env() {
-        unsafe { std::env::set_var("IMG2PDF_PDF_BACKEND", "pdfwriter") };
-        assert_eq!(ImageProcessor::pdf_backend(), "pdfwriter");
-
-        // 未知の値はデフォルト (printpdf) にフォールバック
-        unsafe { std::env::set_var("IMG2PDF_PDF_BACKEND", "unknown") };
-        assert_eq!(ImageProcessor::pdf_backend(), "printpdf");
-
-        unsafe { std::env::remove_var("IMG2PDF_PDF_BACKEND") };
-    }
-
-    /// C-1: pdfwriter バックエンドが有効な PDF を生成することを確認
-    #[test]
-    fn test_generate_pdf_pdfwriter_backend() {
-        let tmp = std::env::temp_dir().join("img2pdf_test_pdfwriter.pdf");
-        let path_str = tmp.to_string_lossy().to_string();
-
-        unsafe { std::env::set_var("IMG2PDF_PDF_BACKEND", "pdfwriter") };
-        let page = make_jpeg_page(200, 283, [200, 200, 200]);
-        ImageProcessor::generate_pdf(vec![page], &path_str, 200)
-            .expect("pdfwriter PDF generation failed");
-        unsafe { std::env::remove_var("IMG2PDF_PDF_BACKEND") };
-
-        let content = std::fs::read(&tmp).unwrap();
-        assert!(
-            content.starts_with(b"%PDF"),
-            "pdfwriter output should start with %PDF"
-        );
-        assert!(!content.is_empty(), "pdfwriter output should not be empty");
-
-        let _ = std::fs::remove_file(&tmp);
     }
 }
