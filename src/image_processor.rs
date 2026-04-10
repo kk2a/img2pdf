@@ -3,9 +3,12 @@ use crate::utils::constants::*;
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+
+const PROJECT_TOOLS_DIR: &str = "tools";
 
 /// CPU コア数の約 70% のスレッド数を算出する
 ///
@@ -43,6 +46,24 @@ pub struct JpegPage {
 pub struct ImageProcessor;
 
 impl ImageProcessor {
+    /// プロジェクト内の実行ツールを解決する
+    fn resolve_tool_path(tool_name: &str) -> Option<PathBuf> {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut candidates = vec![
+            base.join(PROJECT_TOOLS_DIR).join(tool_name),
+            base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.exe")),
+            base.join(tool_name),
+            base.join(format!("{tool_name}.exe")),
+        ];
+
+        if cfg!(windows) {
+            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.bat")));
+            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.cmd")));
+        }
+
+        candidates.into_iter().find(|p| p.exists())
+    }
+
     /// A4 比率からキャンバス高さ（ピクセル）を計算する
     ///
     /// # Arguments
@@ -109,6 +130,71 @@ impl ImageProcessor {
         Ok(jpeg_bytes)
     }
 
+    /// JPEG を可逆最適化する（量子化は維持、ハフマン最適化のみ）
+    ///
+    /// - `jpegtran` 未導入または失敗時は、入力をそのまま返す
+    /// - サイズが小さくならない場合も、入力をそのまま返す
+    fn optimize_jpeg_lossless(jpeg_bytes: Vec<u8>) -> Vec<u8> {
+        use std::process::Command;
+        use std::process::Stdio;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let Some(jpegtran_path) = Self::resolve_tool_path("jpegtran") else {
+            return jpeg_bytes;
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_dir = std::env::temp_dir();
+        let input_path = tmp_dir.join(format!("img2pdf_jpegtran_in_{unique}.jpg"));
+        let output_path = tmp_dir.join(format!("img2pdf_jpegtran_out_{unique}.jpg"));
+
+        if std::fs::write(&input_path, &jpeg_bytes).is_err() {
+            return jpeg_bytes;
+        }
+
+        let status = match Command::new(&jpegtran_path)
+            .args(["-copy", "none", "-optimize"])
+            .arg(&input_path)
+            .arg(&output_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(s) => s,
+            Err(_e) => {
+                let _ = std::fs::remove_file(&input_path);
+                return jpeg_bytes;
+            }
+        };
+
+        if !status.success() {
+            let _ = std::fs::remove_file(&input_path);
+            let _ = std::fs::remove_file(&output_path);
+            return jpeg_bytes;
+        }
+
+        let output = match std::fs::read(&output_path) {
+            Ok(bytes) => bytes,
+            Err(_e) => {
+                let _ = std::fs::remove_file(&input_path);
+                let _ = std::fs::remove_file(&output_path);
+                return jpeg_bytes;
+            }
+        };
+
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&output_path);
+
+        if output.len() < jpeg_bytes.len() {
+            output
+        } else {
+            jpeg_bytes
+        }
+    }
+
     /// 単一ファイルを読み込み → A4 キャンバスに配置 → JPEG エンコードまでを一括で行う
     ///
     /// `RgbImage` はエンコード後に即座にドロップし、メモリを解放する。
@@ -124,6 +210,7 @@ impl ImageProcessor {
             file_path: file_path.to_string_lossy().to_string(),
             message: format!("JPEG encode failed: {msg}"),
         })?;
+        let jpeg_data = Self::optimize_jpeg_lossless(jpeg_data);
         Ok(JpegPage {
             width: w,
             height: h,
@@ -511,5 +598,13 @@ mod tests {
             n,
             "Atomic counter should equal {n} after {n} increments"
         );
+    }
+
+    /// 不正な入力では可逆最適化が失敗し、元バイト列を返すことを確認
+    #[test]
+    fn test_optimize_jpeg_lossless_fallback_on_invalid_input() {
+        let invalid = vec![1_u8, 2, 3, 4, 5];
+        let out = ImageProcessor::optimize_jpeg_lossless(invalid.clone());
+        assert_eq!(out, invalid);
     }
 }

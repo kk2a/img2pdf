@@ -3,8 +3,13 @@
 /// RUST_MIGRATION_GUIDE.md §13 テスト項目チェックリストに対応
 #[cfg(test)]
 mod tests {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ImageBuffer, Rgb, RgbImage};
     use img2pdf::image_processor::{calc_worker_threads, ImageProcessor};
     use img2pdf::utils::constants::A4_RATIO;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     // ─── calculate_height ───────────────────────────────────────────────
 
@@ -84,5 +89,64 @@ mod tests {
         ];
         let parsed = parse_args(&args).expect("Should parse with --width");
         assert_eq!(parsed.canvas_width, 800);
+    }
+
+    // ─── jpegtran 最小疎通 ─────────────────────────────────────────────
+
+    fn find_jpegtran() -> Option<PathBuf> {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let candidates = [
+            base.join("tools").join("jpegtran.exe"),
+            base.join("tools").join("jpegtran"),
+            base.join("jpegtran.exe"),
+            base.join("jpegtran"),
+        ];
+        candidates.into_iter().find(|p| p.exists())
+    }
+
+    #[test]
+    fn test_jpegtran_lossless_minimal_smoke() {
+        let jpegtran = find_jpegtran().expect(
+            "jpegtran が見つかりません。tools/jpegtran.exe か プロジェクトルート/jpegtran.exe を配置してください。",
+        );
+
+        // 単色の小さい JPEG を作成
+        let img: RgbImage = ImageBuffer::from_pixel(32, 32, Rgb([220, 220, 220]));
+        let mut input_jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut input_jpeg, 80)
+            .encode_image(&img)
+            .expect("failed to create input jpeg");
+
+        // jpegtran はこの環境では input/output ファイル指定が必要
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = std::env::temp_dir();
+        let in_path = tmp.join(format!("img2pdf_smoke_in_{unique}.jpg"));
+        let out_path = tmp.join(format!("img2pdf_smoke_out_{unique}.jpg"));
+        std::fs::write(&in_path, &input_jpeg).expect("failed to write input jpeg");
+
+        let out = Command::new(jpegtran)
+            .args(["-copy", "none", "-optimize"])
+            .arg(&in_path)
+            .arg(&out_path)
+            .output()
+            .expect("failed to run jpegtran");
+
+        assert!(
+            out.status.success(),
+            "jpegtran failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out_bytes = std::fs::read(&out_path).expect("failed to read jpegtran output file");
+        assert!(!out_bytes.is_empty(), "jpegtran output is empty");
+        assert!(
+            out_bytes.starts_with(&[0xFF, 0xD8]),
+            "jpegtran output is not JPEG"
+        );
+
+        let _ = std::fs::remove_file(&in_path);
+        let _ = std::fs::remove_file(&out_path);
     }
 }
