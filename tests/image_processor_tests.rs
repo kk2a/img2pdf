@@ -92,6 +92,8 @@ mod tests {
     }
 
     // ─── jpegtran 最小疎通 ─────────────────────────────────────────────
+    // A-1 (JPEG 可逆最適化) は却下済みのため、jpegtran を使用した最適化は削除された。
+    // このテストは参考として保持するが、jpegtran バイナリが配置されていない場合はスキップする。
 
     fn find_jpegtran() -> Option<PathBuf> {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -106,9 +108,10 @@ mod tests {
 
     #[test]
     fn test_jpegtran_lossless_minimal_smoke() {
-        let jpegtran = find_jpegtran().expect(
-            "jpegtran が見つかりません。tools/jpegtran.exe か プロジェクトルート/jpegtran.exe を配置してください。",
-        );
+        let Some(jpegtran) = find_jpegtran() else {
+            eprintln!("jpegtran が見つかりません。テストをスキップします。");
+            return;
+        };
 
         // 単色の小さい JPEG を作成
         let img: RgbImage = ImageBuffer::from_pixel(32, 32, Rgb([220, 220, 220]));

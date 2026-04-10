@@ -3,12 +3,9 @@ use crate::utils::constants::*;
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-
-const PROJECT_TOOLS_DIR: &str = "tools";
 
 /// CPU コア数の約 70% のスレッド数を算出する
 ///
@@ -46,30 +43,29 @@ pub struct JpegPage {
 pub struct ImageProcessor;
 
 impl ImageProcessor {
-    /// プロジェクト内の実行ツールを解決する
-    fn resolve_tool_path(tool_name: &str) -> Option<PathBuf> {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut candidates = vec![
-            base.join(PROJECT_TOOLS_DIR).join(tool_name),
-            base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.exe")),
-            base.join(tool_name),
-            base.join(format!("{tool_name}.exe")),
-        ];
-
-        if cfg!(windows) {
-            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.bat")));
-            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.cmd")));
-        }
-
-        candidates.into_iter().find(|p| p.exists())
-    }
-
     /// A4 比率からキャンバス高さ（ピクセル）を計算する
     ///
     /// # Arguments
     /// * `width` - キャンバス幅（ピクセル）
     pub fn calculate_height(width: u32) -> u32 {
         ((width as f32 * A4_RATIO) + 0.5) as u32
+    }
+
+    /// B-1: 環境変数 `IMG2PDF_RESIZE_FILTER` からリサイズフィルタを取得する
+    ///
+    /// 有効な値: `lanczos3`（デフォルト）, `triangle`, `catmullrom`, `gaussian`, `nearest`
+    /// 比較実験時は環境変数を切り替えることで簡単にフィルタを変更できる。
+    pub fn resize_filter() -> image::imageops::FilterType {
+        match std::env::var("IMG2PDF_RESIZE_FILTER")
+            .as_deref()
+            .unwrap_or("lanczos3")
+        {
+            "nearest" => image::imageops::FilterType::Nearest,
+            "triangle" => image::imageops::FilterType::Triangle,
+            "catmullrom" => image::imageops::FilterType::CatmullRom,
+            "gaussian" => image::imageops::FilterType::Gaussian,
+            _ => image::imageops::FilterType::Lanczos3,
+        }
     }
 
     /// 単一の JPEG 画像を読み込み、A4 キャンバスに中央配置して返す
@@ -106,7 +102,7 @@ impl ImageProcessor {
             &img_rgb,
             new_w,
             new_h,
-            image::imageops::FilterType::Lanczos3,
+            Self::resize_filter(),
         );
 
         // 4. 白色キャンバスに中央配置
@@ -130,71 +126,6 @@ impl ImageProcessor {
         Ok(jpeg_bytes)
     }
 
-    /// JPEG を可逆最適化する（量子化は維持、ハフマン最適化のみ）
-    ///
-    /// - `jpegtran` 未導入または失敗時は、入力をそのまま返す
-    /// - サイズが小さくならない場合も、入力をそのまま返す
-    fn optimize_jpeg_lossless(jpeg_bytes: Vec<u8>) -> Vec<u8> {
-        use std::process::Command;
-        use std::process::Stdio;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let Some(jpegtran_path) = Self::resolve_tool_path("jpegtran") else {
-            return jpeg_bytes;
-        };
-
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp_dir = std::env::temp_dir();
-        let input_path = tmp_dir.join(format!("img2pdf_jpegtran_in_{unique}.jpg"));
-        let output_path = tmp_dir.join(format!("img2pdf_jpegtran_out_{unique}.jpg"));
-
-        if std::fs::write(&input_path, &jpeg_bytes).is_err() {
-            return jpeg_bytes;
-        }
-
-        let status = match Command::new(&jpegtran_path)
-            .args(["-copy", "none", "-optimize"])
-            .arg(&input_path)
-            .arg(&output_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        {
-            Ok(s) => s,
-            Err(_e) => {
-                let _ = std::fs::remove_file(&input_path);
-                return jpeg_bytes;
-            }
-        };
-
-        if !status.success() {
-            let _ = std::fs::remove_file(&input_path);
-            let _ = std::fs::remove_file(&output_path);
-            return jpeg_bytes;
-        }
-
-        let output = match std::fs::read(&output_path) {
-            Ok(bytes) => bytes,
-            Err(_e) => {
-                let _ = std::fs::remove_file(&input_path);
-                let _ = std::fs::remove_file(&output_path);
-                return jpeg_bytes;
-            }
-        };
-
-        let _ = std::fs::remove_file(&input_path);
-        let _ = std::fs::remove_file(&output_path);
-
-        if output.len() < jpeg_bytes.len() {
-            output
-        } else {
-            jpeg_bytes
-        }
-    }
-
     /// 単一ファイルを読み込み → A4 キャンバスに配置 → JPEG エンコードまでを一括で行う
     ///
     /// `RgbImage` はエンコード後に即座にドロップし、メモリを解放する。
@@ -210,7 +141,6 @@ impl ImageProcessor {
             file_path: file_path.to_string_lossy().to_string(),
             message: format!("JPEG encode failed: {msg}"),
         })?;
-        let jpeg_data = Self::optimize_jpeg_lossless(jpeg_data);
         Ok(JpegPage {
             width: w,
             height: h,
@@ -249,6 +179,12 @@ impl ImageProcessor {
         let canvas_height = Self::calculate_height(canvas_width);
         let total = file_list.len();
 
+        // B-1: 使用するリサイズフィルタをログに記録（比較実験用）
+        let filter = Self::resize_filter();
+        let filter_name = std::env::var("IMG2PDF_RESIZE_FILTER")
+            .unwrap_or_else(|_| "lanczos3".to_string());
+        eprintln!("[img2pdf] resize_filter={filter_name} ({filter:?})");
+
         // 進捗カウンター: Mutex を使わず AtomicUsize でロックフリーに管理
         let counter = Arc::new(AtomicUsize::new(0));
 
@@ -265,13 +201,19 @@ impl ImageProcessor {
                 );
 
                 // ロックフリーで進捗カウンタをインクリメント
+                // A-3: パーセンテージが変化した時のみ通知し、チャネル送受信コストを削減
                 if let Some(ref tx) = progress_tx {
                     let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    let _ = tx.send(ProgressUpdate {
-                        count,
-                        total,
-                        phase: ProgressPhase::Processing,
-                    });
+                    let safe_total = total.max(1);
+                    let prev_pct = (count - 1) * 100 / safe_total;
+                    let curr_pct = count * 100 / safe_total;
+                    if curr_pct != prev_pct || count == total {
+                        let _ = tx.send(ProgressUpdate {
+                            count,
+                            total,
+                            phase: ProgressPhase::Processing,
+                        });
+                    }
                 }
 
                 (idx, result)
@@ -600,11 +542,37 @@ mod tests {
         );
     }
 
-    /// 不正な入力では可逆最適化が失敗し、元バイト列を返すことを確認
+    /// B-1: resize_filter がデフォルトで Lanczos3 を返し、環境変数で変更できることを確認
     #[test]
-    fn test_optimize_jpeg_lossless_fallback_on_invalid_input() {
-        let invalid = vec![1_u8, 2, 3, 4, 5];
-        let out = ImageProcessor::optimize_jpeg_lossless(invalid.clone());
-        assert_eq!(out, invalid);
+    fn test_resize_filter_default_is_lanczos3() {
+        // 環境変数が未設定の場合は Lanczos3
+        unsafe { std::env::remove_var("IMG2PDF_RESIZE_FILTER") };
+        let f = ImageProcessor::resize_filter();
+        assert!(
+            matches!(f, image::imageops::FilterType::Lanczos3),
+            "Default filter should be Lanczos3"
+        );
+    }
+
+    /// B-1: 環境変数 IMG2PDF_RESIZE_FILTER で各フィルタに切り替えられることを確認
+    #[test]
+    fn test_resize_filter_from_env() {
+        let cases = [
+            ("nearest", image::imageops::FilterType::Nearest),
+            ("triangle", image::imageops::FilterType::Triangle),
+            ("catmullrom", image::imageops::FilterType::CatmullRom),
+            ("gaussian", image::imageops::FilterType::Gaussian),
+            ("lanczos3", image::imageops::FilterType::Lanczos3),
+            ("unknown_value", image::imageops::FilterType::Lanczos3),
+        ];
+        for (name, expected) in cases {
+            unsafe { std::env::set_var("IMG2PDF_RESIZE_FILTER", name) };
+            let f = ImageProcessor::resize_filter();
+            assert!(
+                std::mem::discriminant(&f) == std::mem::discriminant(&expected),
+                "Filter for '{name}' should match expected variant"
+            );
+        }
+        unsafe { std::env::remove_var("IMG2PDF_RESIZE_FILTER") };
     }
 }
