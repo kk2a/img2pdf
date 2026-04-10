@@ -3,8 +3,9 @@ use crate::utils::constants::*;
 use image::{ImageBuffer, Rgb, RgbImage};
 use rayon::prelude::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// CPU コア数の約 70% のスレッド数を算出する
 ///
@@ -27,6 +28,15 @@ pub fn init_thread_pool() {
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build_global();
+}
+
+/// PDF に埋め込む 1 ページ分のデータ（JPEG エンコード済み）
+///
+/// `RgbImage` は encode 後すぐに解放されるため、長期保持しない。
+pub struct JpegPage {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
 }
 
 /// 画像処理と PDF 生成を担うコアモジュール
@@ -89,6 +99,38 @@ impl ImageProcessor {
         Ok(canvas)
     }
 
+    /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする
+    pub fn encode_jpeg(img: &RgbImage) -> Result<Vec<u8>, String> {
+        use image::codecs::jpeg::JpegEncoder;
+        let mut jpeg_bytes: Vec<u8> = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg_bytes, PDF_QUALITY)
+            .encode_image(img)
+            .map_err(|e| e.to_string())?;
+        Ok(jpeg_bytes)
+    }
+
+    /// 単一ファイルを読み込み → A4 キャンバスに配置 → JPEG エンコードまでを一括で行う
+    ///
+    /// `RgbImage` はエンコード後に即座にドロップし、メモリを解放する。
+    fn process_and_encode(
+        file_path: &Path,
+        canvas_w: u32,
+        canvas_h: u32,
+    ) -> Result<JpegPage, ProcessingError> {
+        let canvas = Self::process_single_image(file_path, canvas_w, canvas_h)?;
+        let (w, h) = (canvas.width(), canvas.height());
+        // JPEG エンコード後に canvas (RgbImage) をドロップ → メモリ解放
+        let jpeg_data = Self::encode_jpeg(&canvas).map_err(|msg| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("JPEG encode failed: {msg}"),
+        })?;
+        Ok(JpegPage {
+            width: w,
+            height: h,
+            data: jpeg_data,
+        })
+    }
+
     /// 複数画像を並列処理して PDF を生成する（別スレッドで実行）
     ///
     /// # Arguments
@@ -110,7 +152,7 @@ impl ImageProcessor {
         });
     }
 
-    /// スレッド内のメイン処理（並列画像処理 → PDF 生成）
+    /// スレッド内のメイン処理（並列画像処理＋JPEG エンコード → PDF 生成）
     fn run_thread(
         file_list: Vec<String>,
         canvas_width: u32,
@@ -120,26 +162,26 @@ impl ImageProcessor {
         let canvas_height = Self::calculate_height(canvas_width);
         let total = file_list.len();
 
-        // 進捗カウンター（スレッドセーフ）
-        let counter = Arc::new(Mutex::new(0usize));
+        // 進捗カウンター: Mutex を使わず AtomicUsize でロックフリーに管理
+        let counter = Arc::new(AtomicUsize::new(0));
 
-        // ファイルを並列処理（インデックスで順序を保持）
-        let results: Vec<(usize, Result<RgbImage, ProcessingError>)> = file_list
+        // 並列処理: ロード・リサイズ・JPEG エンコードを一括で実施し
+        // RgbImage をすぐに解放してメモリ圧迫を抑える
+        let mut results: Vec<(usize, Result<JpegPage, ProcessingError>)> = file_list
             .par_iter()
             .enumerate()
             .map(|(idx, file_path)| {
-                let result = Self::process_single_image(
+                let result = Self::process_and_encode(
                     Path::new(file_path),
                     canvas_width,
                     canvas_height,
                 );
 
-                // 進捗通知
+                // ロックフリーで進捗カウンタをインクリメント
                 if let Some(ref tx) = progress_tx {
-                    let mut count = counter.lock().unwrap();
-                    *count += 1;
+                    let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
                     let _ = tx.send(ProgressUpdate {
-                        count: *count,
+                        count,
                         total,
                         phase: ProgressPhase::Processing,
                     });
@@ -150,21 +192,22 @@ impl ImageProcessor {
             .collect();
 
         // インデックス順にソート（入力ファイルの順序を保持）
-        let mut ordered = results;
-        ordered.sort_by_key(|(idx, _)| *idx);
+        results.sort_unstable_by_key(|(idx, _)| *idx);
 
-        // 成功・失敗を分類
-        let mut success_images: Vec<RgbImage> = Vec::new();
+        // 成功・失敗を分類（中間 Vec を減らし、直接 partition）
         let mut errors: Vec<ProcessingError> = Vec::new();
+        let success_pages: Vec<JpegPage> = results
+            .into_iter()
+            .filter_map(|(_, result)| match result {
+                Ok(page) => Some(page),
+                Err(e) => {
+                    errors.push(e);
+                    None
+                }
+            })
+            .collect();
 
-        for (_, result) in ordered {
-            match result {
-                Ok(img) => success_images.push(img),
-                Err(e) => errors.push(e),
-            }
-        }
-
-        if success_images.is_empty() {
+        if success_pages.is_empty() {
             return ProcessingResult {
                 success: false,
                 success_count: 0,
@@ -183,11 +226,11 @@ impl ImageProcessor {
             });
         }
 
-        // PDF 生成
-        match Self::generate_pdf(&success_images, &output_path, canvas_width) {
+        // PDF 生成（JPEG バイトはすでに並列フェーズで揃っている）
+        match Self::generate_pdf(&success_pages, &output_path, canvas_width) {
             Ok(()) => ProcessingResult {
                 success: true,
-                success_count: success_images.len(),
+                success_count: success_pages.len(),
                 error_count: errors.len(),
                 errors,
                 output_path,
@@ -208,22 +251,13 @@ impl ImageProcessor {
         }
     }
 
-    /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする
-    pub fn encode_jpeg(img: &RgbImage) -> Result<Vec<u8>, String> {
-        use image::codecs::jpeg::JpegEncoder;
-        let mut jpeg_bytes: Vec<u8> = Vec::new();
-        JpegEncoder::new_with_quality(&mut jpeg_bytes, PDF_QUALITY)
-            .encode_image(img)
-            .map_err(|e| e.to_string())?;
-        Ok(jpeg_bytes)
-    }
-
-    /// 処理済み画像群から PDF ファイルを生成する
+    /// JPEG エンコード済みページ群から PDF ファイルを生成する
     ///
-    /// 各画像を JPEG (DCTDecode) で圧縮してから PDF ページとして埋め込む。
+    /// JPEG バイトはすでに並列処理フェーズで生成済みであり、
+    /// このフェーズでは再エンコードを行わない。
     /// DPI は `canvas_width` から自動計算される。
     pub fn generate_pdf(
-        images: &[RgbImage],
+        pages: Vec<JpegPage>,
         output_path: &str,
         canvas_width: u32,
     ) -> Result<(), String> {
@@ -231,7 +265,7 @@ impl ImageProcessor {
         use std::fs::File;
         use std::io::BufWriter;
 
-        if images.is_empty() {
+        if pages.is_empty() {
             return Err("No images to process".to_string());
         }
 
@@ -250,7 +284,7 @@ impl ImageProcessor {
             "Layer 1",
         );
 
-        for (page_idx, img) in images.iter().enumerate() {
+        for (page_idx, page) in pages.into_iter().enumerate() {
             let (current_page, current_layer) = if page_idx == 0 {
                 (first_page, first_layer)
             } else {
@@ -259,18 +293,15 @@ impl ImageProcessor {
 
             let layer = doc.get_page(current_page).get_layer(current_layer);
 
-            // JPEG バイト列にエンコード（DCTDecode フィルタで PDF サイズを削減）
-            let jpeg_bytes = Self::encode_jpeg(img)?;
-
-            // ImageXObject を DCTDecode フィルタ付きで構築
+            // 並列フェーズで生成済みの JPEG バイトを直接使用（再エンコードなし）
             let pdf_image = Image {
                 image: ImageXObject {
-                    width: Px(img.width() as usize),
-                    height: Px(img.height() as usize),
+                    width: Px(page.width as usize),
+                    height: Px(page.height as usize),
                     color_space: ColorSpace::Rgb,
                     bits_per_component: ColorBits::Bit8,
                     interpolate: true,
-                    image_data: jpeg_bytes,
+                    image_data: page.data,
                     image_filter: Some(ImageFilter::DCT),
                     smask: None,
                     clipping_bbox: None,
@@ -306,6 +337,13 @@ mod tests {
     /// テスト用の単色 RGB 画像を生成する
     fn make_test_image(width: u32, height: u32, color: [u8; 3]) -> RgbImage {
         ImageBuffer::from_pixel(width, height, Rgb(color))
+    }
+
+    /// テスト用 JpegPage を生成する
+    fn make_jpeg_page(width: u32, height: u32, color: [u8; 3]) -> JpegPage {
+        let img = make_test_image(width, height, color);
+        let data = ImageProcessor::encode_jpeg(&img).expect("encode failed");
+        JpegPage { width, height, data }
     }
 
     #[test]
@@ -396,12 +434,12 @@ mod tests {
         let path_str = tmp.to_string_lossy().to_string();
 
         // 小さめのテスト画像 (200x283 ≈ A4比率)
-        let img = make_test_image(200, 283, [240, 240, 240]);
-        ImageProcessor::generate_pdf(&[img.clone()], &path_str, 200)
+        let page = make_jpeg_page(200, 283, [240, 240, 240]);
+        let raw_rgb_size = (page.width * page.height * 3) as u64;
+        ImageProcessor::generate_pdf(&[page], &path_str, 200)
             .expect("PDF generation failed");
 
         let pdf_size = std::fs::metadata(&tmp).unwrap().len();
-        let raw_rgb_size = (img.width() * img.height() * 3) as u64;
 
         // PDF は生 RGB より大幅に小さい（JPEG 圧縮が効いている）
         assert!(
@@ -419,6 +457,26 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    /// generate_pdf が複数ページを正しく処理することを確認
+    #[test]
+    fn test_generate_pdf_multiple_pages() {
+        let tmp = std::env::temp_dir().join("img2pdf_test_multi.pdf");
+        let path_str = tmp.to_string_lossy().to_string();
+
+        let pages = vec![
+            make_jpeg_page(200, 283, [255, 0, 0]),
+            make_jpeg_page(200, 283, [0, 255, 0]),
+            make_jpeg_page(200, 283, [0, 0, 255]),
+        ];
+        ImageProcessor::generate_pdf(&pages, &path_str, 200)
+            .expect("PDF generation failed");
+
+        let content = std::fs::read(&tmp).unwrap();
+        assert!(content.starts_with(b"%PDF"), "Output should be valid PDF");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     /// calc_worker_threads が常に 1 以上を返すことを確認
     #[test]
     fn test_calc_worker_threads() {
@@ -432,6 +490,24 @@ mod tests {
         assert!(
             n <= cpu_count,
             "Worker threads ({n}) must not exceed CPU count ({cpu_count})"
+        );
+    }
+
+    /// AtomicUsize ベースの進捗カウンタが並列アクセスで正確に動作することを確認
+    #[test]
+    fn test_atomic_counter_correctness() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = Arc::new(AtomicUsize::new(0));
+        let n = 100usize;
+
+        (0..n).into_par_iter().for_each(|_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            n,
+            "Atomic counter should equal {n} after {n} increments"
         );
     }
 }
