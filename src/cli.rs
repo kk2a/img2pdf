@@ -15,6 +15,7 @@
 use crate::image_processor::ImageProcessor;
 use crate::models::{ProcessingResult, ProgressPhase, ProgressUpdate};
 use crate::utils::constants::DEFAULT_WIDTH;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -122,16 +123,22 @@ pub fn run(args: &CliArgs) -> ProcessingResult {
 
     // 進捗表示スレッド
     let total_for_display = file_list.len();
-    std::thread::spawn(move || {
+    let progress_handle = std::thread::spawn(move || {
+        let mut has_output = false;
         for update in progress_rx {
-            match update.phase {
-                ProgressPhase::Processing => {
-                    eprintln!("  画像処理中 ({}/{})", update.count, update.total);
-                }
-                ProgressPhase::Saving => {
-                    eprintln!("  PDF 書き出し中... ({} ページ)", total_for_display);
-                }
-            }
+            let (label, count, total) = match update.phase {
+                ProgressPhase::Processing => ("画像処理", update.count, update.total),
+                ProgressPhase::Saving => ("PDF保存", total_for_display, total_for_display),
+            };
+
+            let line = render_progress_line(label, count, total);
+            eprint!("\r{line}");
+            let _ = io::stderr().flush();
+            has_output = true;
+        }
+
+        if has_output {
+            eprintln!();
         }
     });
 
@@ -144,7 +151,7 @@ pub fn run(args: &CliArgs) -> ProcessingResult {
     );
 
     // 完了まで待機（ブロッキング）
-    finished_rx.recv().unwrap_or_else(|_| ProcessingResult {
+    let result = finished_rx.recv().unwrap_or_else(|_| ProcessingResult {
         success: false,
         success_count: 0,
         error_count: 1,
@@ -153,7 +160,20 @@ pub fn run(args: &CliArgs) -> ProcessingResult {
             message: "Processing thread disconnected".to_string(),
         }],
         output_path: args.output_path.clone(),
-    })
+    });
+
+    let _ = progress_handle.join();
+    result
+}
+
+/// CLI 用の 1 行プログレス表示文字列を作る
+fn render_progress_line(label: &str, count: usize, total: usize) -> String {
+    let safe_total = total.max(1);
+    let pct = (count.min(safe_total) * 100) / safe_total;
+    let width = 30usize;
+    let filled = (pct * width) / 100;
+    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
+    format!("  {label}: [{bar}] {pct:>3}% ({count}/{total})")
 }
 
 /// フォルダ内の JPEG ファイルを収集する（再帰なし）
