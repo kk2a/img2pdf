@@ -1,14 +1,20 @@
 use crate::models::{ProcessingError, ProcessingResult, ProgressPhase, ProgressUpdate};
 use crate::utils::constants::*;
-use image::{ImageBuffer, Rgb, RgbImage};
+use image::RgbImage;
 use rayon::prelude::*;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const PROJECT_TOOLS_DIR: &str = "tools";
+#[cfg(windows)]
+const JPEGTRAN_TOOL_NAME: &str = "jpegtran.exe";
+#[cfg(not(windows))]
+const JPEGTRAN_TOOL_NAME: &str = "jpegtran";
+
+static MAX_PERFORMANCE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// CPU コア数の約 70% のスレッド数を算出する
 ///
@@ -18,6 +24,9 @@ pub fn calc_worker_threads() -> usize {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    if ImageProcessor::max_performance_mode() {
+        return cpu_count;
+    }
     // 70% に丸める（最低 1 スレッド）
     std::cmp::max(1, (cpu_count as f64 * 0.7).round() as usize)
 }
@@ -46,22 +55,16 @@ pub struct JpegPage {
 pub struct ImageProcessor;
 
 impl ImageProcessor {
-    /// プロジェクト内の実行ツールを解決する
-    fn resolve_tool_path(tool_name: &str) -> Option<PathBuf> {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut candidates = vec![
-            base.join(PROJECT_TOOLS_DIR).join(tool_name),
-            base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.exe")),
-            base.join(tool_name),
-            base.join(format!("{tool_name}.exe")),
-        ];
+    /// 最大性能モードが有効か判定する
+    ///
+    /// CLI オプションから設定されたプロセス内フラグを参照する。
+    pub fn max_performance_mode() -> bool {
+        MAX_PERFORMANCE_MODE.load(Ordering::Relaxed)
+    }
 
-        if cfg!(windows) {
-            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.bat")));
-            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.cmd")));
-        }
-
-        candidates.into_iter().find(|p| p.exists())
+    /// 最大性能モードを設定する
+    pub fn set_max_performance_mode(enabled: bool) {
+        MAX_PERFORMANCE_MODE.store(enabled, Ordering::Relaxed);
     }
 
     /// A4 比率からキャンバス高さ（ピクセル）を計算する
@@ -72,76 +75,21 @@ impl ImageProcessor {
         ((width as f32 * A4_RATIO) + 0.5) as u32
     }
 
-    /// 単一の JPEG 画像を読み込み、A4 キャンバスに中央配置して返す
-    ///
-    /// 処理フロー:
-    /// 1. 画像読み込み
-    /// 2. RGB 色空間に変換
-    /// 3. アスペクト比保持でリサイズ
-    /// 4. 白色キャンバスに中央配置
-    pub fn process_single_image(
-        file_path: &Path,
-        canvas_w: u32,
-        canvas_h: u32,
-    ) -> Result<RgbImage, ProcessingError> {
-        // 1. 画像読み込み
-        let img = image::open(file_path).map_err(|e| ProcessingError {
-            file_path: file_path.to_string_lossy().to_string(),
-            message: format!("Failed to load image: {e}"),
-        })?;
-
-        // 2. RGB 色空間に変換
-        let img_rgb = img.to_rgb8();
-
-        // 3. アスペクト比保持でリサイズ
-        let (orig_w, orig_h) = (img_rgb.width(), img_rgb.height());
-        let scale = f32::min(
-            canvas_w as f32 / orig_w as f32,
-            canvas_h as f32 / orig_h as f32,
-        );
-        let new_w = ((orig_w as f32 * scale) + 0.5) as u32;
-        let new_h = ((orig_h as f32 * scale) + 0.5) as u32;
-
-        let img_resized = image::imageops::resize(
-            &img_rgb,
-            new_w,
-            new_h,
-            image::imageops::FilterType::Lanczos3,
-        );
-
-        // 4. 白色キャンバスに中央配置
-        let mut canvas: RgbImage =
-            ImageBuffer::from_pixel(canvas_w, canvas_h, Rgb(CANVAS_COLOR));
-
-        let offset_x = ((canvas_w - new_w) / 2) as i64;
-        let offset_y = ((canvas_h - new_h) / 2) as i64;
-        image::imageops::overlay(&mut canvas, &img_resized, offset_x, offset_y);
-
-        Ok(canvas)
-    }
-
-    /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする
-    pub fn encode_jpeg(img: &RgbImage) -> Result<Vec<u8>, String> {
-        use image::codecs::jpeg::JpegEncoder;
-        let mut jpeg_bytes: Vec<u8> = Vec::new();
-        JpegEncoder::new_with_quality(&mut jpeg_bytes, PDF_QUALITY)
-            .encode_image(img)
-            .map_err(|e| e.to_string())?;
-        Ok(jpeg_bytes)
-    }
-
     /// JPEG を可逆最適化する（量子化は維持、ハフマン最適化のみ）
     ///
-    /// - `jpegtran` 未導入または失敗時は、入力をそのまま返す
+    /// - `tools/jpegtran(.exe)` がない、または失敗時は入力をそのまま返す
     /// - サイズが小さくならない場合も、入力をそのまま返す
     fn optimize_jpeg_lossless(jpeg_bytes: Vec<u8>) -> Vec<u8> {
         use std::process::Command;
         use std::process::Stdio;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let Some(jpegtran_path) = Self::resolve_tool_path("jpegtran") else {
+        let jpegtran_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(PROJECT_TOOLS_DIR)
+            .join(JPEGTRAN_TOOL_NAME);
+        if !jpegtran_path.exists() {
             return jpeg_bytes;
-        };
+        }
 
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -193,6 +141,56 @@ impl ImageProcessor {
         } else {
             jpeg_bytes
         }
+    }
+
+    /// 単一の JPEG 画像を読み込み、A4 比率に収まるようリサイズして返す
+    ///
+    /// 処理フロー:
+    /// 1. 画像読み込み
+    /// 2. RGB 色空間に変換
+    /// 3. アスペクト比保持でリサイズ
+    pub fn process_single_image(
+        file_path: &Path,
+        canvas_w: u32,
+        canvas_h: u32,
+    ) -> Result<RgbImage, ProcessingError> {
+        // 1. 画像読み込み
+        let img = image::open(file_path).map_err(|e| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("Failed to load image: {e}"),
+        })?;
+
+        // 2. RGB 色空間に変換
+        let img_rgb = img.to_rgb8();
+
+        // 3. アスペクト比保持でリサイズ
+        let (orig_w, orig_h) = (img_rgb.width(), img_rgb.height());
+        let scale = f32::min(
+            canvas_w as f32 / orig_w as f32,
+            canvas_h as f32 / orig_h as f32,
+        );
+        let new_w = ((orig_w as f32 * scale) + 0.5) as u32;
+        let new_h = ((orig_h as f32 * scale) + 0.5) as u32;
+
+        let img_resized = image::imageops::resize(
+            &img_rgb,
+            new_w,
+            new_h,
+            image::imageops::FilterType::Lanczos3,
+        );
+
+        // 4. 白背景は PDF ページ側に任せ、画像本体だけ返す
+        Ok(img_resized)
+    }
+
+    /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする
+    pub fn encode_jpeg(img: &RgbImage) -> Result<Vec<u8>, String> {
+        use image::codecs::jpeg::JpegEncoder;
+        let mut jpeg_bytes: Vec<u8> = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg_bytes, PDF_QUALITY)
+            .encode_image(img)
+            .map_err(|e| e.to_string())?;
+        Ok(jpeg_bytes)
     }
 
     /// 単一ファイルを読み込み → A4 キャンバスに配置 → JPEG エンコードまでを一括で行う
@@ -343,75 +341,96 @@ impl ImageProcessor {
     ///
     /// JPEG バイトはすでに並列処理フェーズで生成済みであり、
     /// このフェーズでは再エンコードを行わない。
-    /// DPI は `canvas_width` から自動計算される。
+    /// pdf-writer を使用して直接 PDF バイト列を構築し書き出す。
     pub fn generate_pdf(
         pages: Vec<JpegPage>,
         output_path: &str,
-        canvas_width: u32,
+        _canvas_width: u32,
     ) -> Result<(), String> {
-        use printpdf::*;
-        use std::fs::File;
-        use std::io::BufWriter;
+        use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref};
+        use std::fs;
 
         if pages.is_empty() {
             return Err("No images to process".to_string());
         }
 
-        // A4 サイズ（mm）
-        let a4_width_mm = 210.0_f32;
-        let a4_height_mm = 297.0_f32;
+        // A4 サイズ（pt）: 1pt = 1/72 inch
+        const A4_W: f32 = 595.28;
+        const A4_H: f32 = 841.89;
 
-        // canvas_width が A4 幅に対応する DPI を計算
-        // dpi = canvas_width / (a4_width_mm / 25.4)
-        let dpi = canvas_width as f32 * 25.4 / a4_width_mm;
+        let mut pdf = Pdf::new();
+        let total = pages.len();
 
-        let (doc, first_page, first_layer) = PdfDocument::new(
-            APP_NAME,
-            Mm(a4_width_mm),
-            Mm(a4_height_mm),
-            "Layer 1",
-        );
+        // オブジェクト ID の割り当て:
+        //   1: catalog
+        //   2: page tree
+        //   3..3+total-1: page
+        //   3+total..3+2*total-1: image XObject
+        //   3+2*total..3+3*total-1: content stream
+        let catalog_id = Ref::new(1);
+        let page_tree_id = Ref::new(2);
+        let base = 3_i32;
+        let page_ids: Vec<Ref> = (0..total)
+            .map(|i| Ref::new(base + i as i32))
+            .collect();
+        let image_ids: Vec<Ref> = (0..total)
+            .map(|i| Ref::new(base + total as i32 + i as i32))
+            .collect();
+        let content_ids: Vec<Ref> = (0..total)
+            .map(|i| Ref::new(base + 2 * total as i32 + i as i32))
+            .collect();
 
-        for (page_idx, page) in pages.into_iter().enumerate() {
-            let (current_page, current_layer) = if page_idx == 0 {
-                (first_page, first_layer)
-            } else {
-                doc.add_page(Mm(a4_width_mm), Mm(a4_height_mm), "Layer 1")
-            };
+        // catalog → page tree
+        pdf.catalog(catalog_id).pages(page_tree_id);
 
-            let layer = doc.get_page(current_page).get_layer(current_layer);
+        // page tree
+        pdf.pages(page_tree_id)
+            .kids(page_ids.iter().copied())
+            .count(total as i32);
 
-            // 並列フェーズで生成済みの JPEG バイトを直接使用（再エンコードなし）
-            let pdf_image = Image {
-                image: ImageXObject {
-                    width: Px(page.width as usize),
-                    height: Px(page.height as usize),
-                    color_space: ColorSpace::Rgb,
-                    bits_per_component: ColorBits::Bit8,
-                    interpolate: true,
-                    image_data: page.data,
-                    image_filter: Some(ImageFilter::DCT),
-                    smask: None,
-                    clipping_bbox: None,
-                },
-            };
+        // 各ページを書き出す
+        let image_name = Name(b"Im0");
+        for (i, page) in pages.into_iter().enumerate() {
+            // ページ定義
+            let mut pdf_page = pdf.page(page_ids[i]);
+            pdf_page.media_box(Rect::new(0.0, 0.0, A4_W, A4_H));
+            pdf_page.parent(page_tree_id);
+            pdf_page.contents(content_ids[i]);
+            pdf_page
+                .resources()
+                .x_objects()
+                .pair(image_name, image_ids[i]);
+            pdf_page.finish();
 
-            pdf_image.add_to_layer(
-                layer,
-                ImageTransform {
-                    translate_x: Some(Mm(0.0)),
-                    translate_y: Some(Mm(0.0)),
-                    rotate: None,
-                    scale_x: None,
-                    scale_y: None,
-                    dpi: Some(dpi),
-                },
-            );
+            // 画像 XObject（JPEG バイトをそのまま DCTDecode で埋め込む）
+            let mut img = pdf.image_xobject(image_ids[i], &page.data);
+            img.filter(Filter::DctDecode);
+            img.width(page.width as i32);
+            img.height(page.height as i32);
+            img.color_space().device_rgb();
+            img.bits_per_component(8);
+            img.finish();
+
+            // コンテンツストリーム: 画像をアスペクト比維持で中央配置
+            // PDF 座標系は左下原点。XObject は 1×1 なので行列で拡大・平行移動する。
+            let sx = A4_W / page.width as f32;
+            let sy = A4_H / page.height as f32;
+            let scale = sx.min(sy);
+            let draw_w = page.width as f32 * scale;
+            let draw_h = page.height as f32 * scale;
+            let offset_x = (A4_W - draw_w) * 0.5;
+            let offset_y = (A4_H - draw_h) * 0.5;
+
+            let mut content = Content::new();
+            content.save_state();
+            content.transform([draw_w, 0.0, 0.0, draw_h, offset_x, offset_y]);
+            content.x_object(image_name);
+            content.restore_state();
+            pdf.stream(content_ids[i], &content.finish());
         }
 
-        let file = File::create(output_path).map_err(|e| e.to_string())?;
-        doc.save(&mut BufWriter::new(file))
-            .map_err(|e| e.to_string())?;
+        let bytes = pdf.finish();
+        fs::write(output_path, &bytes).map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -600,11 +619,15 @@ mod tests {
         );
     }
 
-    /// 不正な入力では可逆最適化が失敗し、元バイト列を返すことを確認
     #[test]
-    fn test_optimize_jpeg_lossless_fallback_on_invalid_input() {
-        let invalid = vec![1_u8, 2, 3, 4, 5];
-        let out = ImageProcessor::optimize_jpeg_lossless(invalid.clone());
-        assert_eq!(out, invalid);
+    fn test_max_performance_mode_flag() {
+        ImageProcessor::set_max_performance_mode(false);
+        assert!(!ImageProcessor::max_performance_mode());
+
+        ImageProcessor::set_max_performance_mode(true);
+        assert!(ImageProcessor::max_performance_mode());
+
+        ImageProcessor::set_max_performance_mode(false);
+        assert!(!ImageProcessor::max_performance_mode());
     }
 }

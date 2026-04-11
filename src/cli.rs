@@ -9,6 +9,8 @@
 //!
 //! Options:
 //!   --width <px>    キャンバス幅 (デフォルト: 1654)
+//!   --max-performance   最大性能モードを有効化（既定）
+//!   --no-max-performance 最大性能モードを無効化
 //!   --help          このヘルプを表示
 //! ```
 
@@ -25,6 +27,7 @@ pub struct CliArgs {
     pub input_folder: String,
     pub output_path: String,
     pub canvas_width: u32,
+    pub max_performance: bool,
 }
 
 /// コマンドライン引数を解析する
@@ -56,17 +59,24 @@ pub fn parse_args(args: &[String]) -> Option<CliArgs> {
         .and_then(|w| w[1].parse::<u32>().ok())
         .unwrap_or(DEFAULT_WIDTH);
 
+    let max_performance = if args.iter().any(|a| a == "--no-max-performance") {
+        false
+    } else {
+        true
+    };
+
     Some(CliArgs {
         input_folder,
         output_path,
         canvas_width,
+        max_performance,
     })
 }
 
 /// ヘルプを表示する
 fn print_usage() {
     eprintln!(
-        "使用方法: img2pdf <input_folder> <output.pdf> [--width <px>]
+        "使用方法: img2pdf <input_folder> <output.pdf> [--width <px>] [--max-performance|--no-max-performance]
 
 引数:
   <input_folder>    処理する JPEG 画像が入ったフォルダ
@@ -74,6 +84,8 @@ fn print_usage() {
 
 オプション:
   --width <px>      キャンバス幅（ピクセル）[デフォルト: {}]
+    --max-performance  最大性能モード（全CPU使用）[デフォルト]
+    --no-max-performance 最大性能モードを無効化
   --help, -h        このヘルプを表示
 
 引数なしで起動すると GUI モードで起動します。",
@@ -85,6 +97,11 @@ fn print_usage() {
 ///
 /// 成功時は `Ok(ProcessingResult)` を返す。
 pub fn run(args: &CliArgs) -> ProcessingResult {
+    ImageProcessor::set_max_performance_mode(args.max_performance);
+    if args.max_performance {
+        eprintln!("最大性能モード: ON");
+    }
+
     // フォルダから JPEG 収集
     let mut file_list = collect_jpeg_files(&args.input_folder);
     file_list.sort_by(|a, b| {
