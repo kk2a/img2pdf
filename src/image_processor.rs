@@ -1,14 +1,20 @@
 use crate::models::{ProcessingError, ProcessingResult, ProgressPhase, ProgressUpdate};
 use crate::utils::constants::*;
-use image::{ImageBuffer, Rgb, RgbImage};
+use image::RgbImage;
 use rayon::prelude::*;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const PROJECT_TOOLS_DIR: &str = "tools";
+#[cfg(windows)]
+const JPEGTRAN_TOOL_NAME: &str = "jpegtran.exe";
+#[cfg(not(windows))]
+const JPEGTRAN_TOOL_NAME: &str = "jpegtran";
+
+static MAX_PERFORMANCE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// CPU コア数の約 70% のスレッド数を算出する
 ///
@@ -18,6 +24,9 @@ pub fn calc_worker_threads() -> usize {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    if ImageProcessor::max_performance_mode() {
+        return cpu_count;
+    }
     // 70% に丸める（最低 1 スレッド）
     std::cmp::max(1, (cpu_count as f64 * 0.7).round() as usize)
 }
@@ -46,6 +55,18 @@ pub struct JpegPage {
 pub struct ImageProcessor;
 
 impl ImageProcessor {
+    /// 最大性能モードが有効か判定する
+    ///
+    /// CLI オプションから設定されたプロセス内フラグを参照する。
+    pub fn max_performance_mode() -> bool {
+        MAX_PERFORMANCE_MODE.load(Ordering::Relaxed)
+    }
+
+    /// 最大性能モードを設定する
+    pub fn set_max_performance_mode(enabled: bool) {
+        MAX_PERFORMANCE_MODE.store(enabled, Ordering::Relaxed);
+    }
+
     /// A4 比率からキャンバス高さ（ピクセル）を計算する
     ///
     /// # Arguments
@@ -54,36 +75,21 @@ impl ImageProcessor {
         ((width as f32 * A4_RATIO) + 0.5) as u32
     }
 
-    /// プロジェクト内の実行ツールを解決する
-    fn resolve_tool_path(tool_name: &str) -> Option<PathBuf> {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut candidates = vec![
-            base.join(PROJECT_TOOLS_DIR).join(tool_name),
-            base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.exe")),
-            base.join(tool_name),
-            base.join(format!("{tool_name}.exe")),
-        ];
-
-        if cfg!(windows) {
-            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.bat")));
-            candidates.push(base.join(PROJECT_TOOLS_DIR).join(format!("{tool_name}.cmd")));
-        }
-
-        candidates.into_iter().find(|p| p.exists())
-    }
-
     /// JPEG を可逆最適化する（量子化は維持、ハフマン最適化のみ）
     ///
-    /// - `jpegtran` 未導入または失敗時は、入力をそのまま返す
+    /// - `tools/jpegtran(.exe)` がない、または失敗時は入力をそのまま返す
     /// - サイズが小さくならない場合も、入力をそのまま返す
     fn optimize_jpeg_lossless(jpeg_bytes: Vec<u8>) -> Vec<u8> {
         use std::process::Command;
         use std::process::Stdio;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let Some(jpegtran_path) = Self::resolve_tool_path("jpegtran") else {
+        let jpegtran_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(PROJECT_TOOLS_DIR)
+            .join(JPEGTRAN_TOOL_NAME);
+        if !jpegtran_path.exists() {
             return jpeg_bytes;
-        };
+        }
 
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -137,13 +143,12 @@ impl ImageProcessor {
         }
     }
 
-    /// 単一の JPEG 画像を読み込み、A4 キャンバスに中央配置して返す
+    /// 単一の JPEG 画像を読み込み、A4 比率に収まるようリサイズして返す
     ///
     /// 処理フロー:
     /// 1. 画像読み込み
     /// 2. RGB 色空間に変換
     /// 3. アスペクト比保持でリサイズ
-    /// 4. 白色キャンバスに中央配置
     pub fn process_single_image(
         file_path: &Path,
         canvas_w: u32,
@@ -174,15 +179,8 @@ impl ImageProcessor {
             image::imageops::FilterType::Lanczos3,
         );
 
-        // 4. 白色キャンバスに中央配置
-        let mut canvas: RgbImage =
-            ImageBuffer::from_pixel(canvas_w, canvas_h, Rgb(CANVAS_COLOR));
-
-        let offset_x = ((canvas_w - new_w) / 2) as i64;
-        let offset_y = ((canvas_h - new_h) / 2) as i64;
-        image::imageops::overlay(&mut canvas, &img_resized, offset_x, offset_y);
-
-        Ok(canvas)
+        // 4. 白背景は PDF ページ側に任せ、画像本体だけ返す
+        Ok(img_resized)
     }
 
     /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする
@@ -265,19 +263,13 @@ impl ImageProcessor {
                 );
 
                 // ロックフリーで進捗カウンタをインクリメント
-                // A-3: パーセンテージが変化した時のみ通知し、チャネル送受信コストを削減
                 if let Some(ref tx) = progress_tx {
                     let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    let safe_total = total.max(1);
-                    let prev_pct = (count - 1) * 100 / safe_total;
-                    let curr_pct = count * 100 / safe_total;
-                    if curr_pct != prev_pct || count == 1 || count == total {
-                        let _ = tx.send(ProgressUpdate {
-                            count,
-                            total,
-                            phase: ProgressPhase::Processing,
-                        });
-                    }
+                    let _ = tx.send(ProgressUpdate {
+                        count,
+                        total,
+                        phase: ProgressPhase::Processing,
+                    });
                 }
 
                 (idx, result)
@@ -419,11 +411,19 @@ impl ImageProcessor {
             img.bits_per_component(8);
             img.finish();
 
-            // コンテンツストリーム: 画像をページ全体に配置
-            // PDF 座標系は左下原点。XObject は 1×1 なので A4 サイズにスケール。
+            // コンテンツストリーム: 画像をアスペクト比維持で中央配置
+            // PDF 座標系は左下原点。XObject は 1×1 なので行列で拡大・平行移動する。
+            let sx = A4_W / page.width as f32;
+            let sy = A4_H / page.height as f32;
+            let scale = sx.min(sy);
+            let draw_w = page.width as f32 * scale;
+            let draw_h = page.height as f32 * scale;
+            let offset_x = (A4_W - draw_w) * 0.5;
+            let offset_y = (A4_H - draw_h) * 0.5;
+
             let mut content = Content::new();
             content.save_state();
-            content.transform([A4_W, 0.0, 0.0, A4_H, 0.0, 0.0]);
+            content.transform([draw_w, 0.0, 0.0, draw_h, offset_x, offset_y]);
             content.x_object(image_name);
             content.restore_state();
             pdf.stream(content_ids[i], &content.finish());
@@ -617,5 +617,17 @@ mod tests {
             n,
             "Atomic counter should equal {n} after {n} increments"
         );
+    }
+
+    #[test]
+    fn test_max_performance_mode_flag() {
+        ImageProcessor::set_max_performance_mode(false);
+        assert!(!ImageProcessor::max_performance_mode());
+
+        ImageProcessor::set_max_performance_mode(true);
+        assert!(ImageProcessor::max_performance_mode());
+
+        ImageProcessor::set_max_performance_mode(false);
+        assert!(!ImageProcessor::max_performance_mode());
     }
 }
