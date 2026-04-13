@@ -5,7 +5,7 @@
 //!
 //! ## 使用方法
 //! ```text
-//! img2pdf <input_folder> <output.pdf> [options]
+//! img2pdf <input_folder> [output.pdf] [options]
 //!
 //! Options:
 //!   --width <px>    キャンバス幅 (デフォルト: 1654)
@@ -18,8 +18,9 @@ use crate::image_processor::ImageProcessor;
 use crate::models::{ProcessingResult, ProgressPhase, ProgressUpdate};
 use crate::utils::constants::DEFAULT_WIDTH;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// CLI 引数
 #[derive(Debug)]
@@ -44,13 +45,12 @@ pub fn parse_args(args: &[String]) -> Option<CliArgs> {
         std::process::exit(0);
     }
 
-    // 最初の 2 引数は必須: <input_folder> <output.pdf>
-    if args.len() < 2 {
-        return None;
-    }
-
+    // 先頭引数は必須: <input_folder>
     let input_folder = args[0].clone();
-    let output_path = args[1].clone();
+    let output_path = match args.get(1) {
+        Some(arg) if !arg.starts_with("--") => arg.clone(),
+        _ => default_output_path(),
+    };
 
     // --width オプション（省略時はデフォルト）
     let canvas_width = args
@@ -76,11 +76,11 @@ pub fn parse_args(args: &[String]) -> Option<CliArgs> {
 /// ヘルプを表示する
 fn print_usage() {
     eprintln!(
-        "使用方法: img2pdf <input_folder> <output.pdf> [--width <px>] [--max-performance|--no-max-performance]
+                "使用方法: img2pdf <input_folder> [output.pdf] [--width <px>] [--max-performance|--no-max-performance]
 
 引数:
   <input_folder>    処理する JPEG 画像が入ったフォルダ
-  <output.pdf>      出力 PDF ファイルパス
+    [output.pdf]      出力 PDF ファイルパス（省略時: output-[seed].pdf）
 
 オプション:
   --width <px>      キャンバス幅（ピクセル）[デフォルト: {}]
@@ -91,6 +91,16 @@ fn print_usage() {
 引数なしで起動すると GUI モードで起動します。",
         DEFAULT_WIDTH
     );
+}
+
+/// 既定の出力先 `output-[seed].pdf` を現在ディレクトリに生成する
+fn default_output_path() -> String {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file_name = format!("output-{seed}.pdf");
+    PathBuf::from(file_name).to_string_lossy().to_string()
 }
 
 /// CLI モードでの処理を実行する（ブロッキング）
