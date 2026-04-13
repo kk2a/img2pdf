@@ -8,6 +8,7 @@
 //! ├─ 2. 設定 ─────────────────────────────┤
 //! │ キャンバス幅 (px): [1654]             │
 //! │ キャンバス高さ: 2339 px               │
+//! │ [✓] 最大性能モードを有効化            │
 //! ├─ 3. 出力 ─────────────────────────────┤
 //! │ [保存先を選択] [未選択................] │
 //! │              [PDF 生成を実行]          │
@@ -18,12 +19,12 @@
 //! ```
 
 use crate::app_config::AppConfig;
-use crate::image_processor::ImageProcessor;
+use crate::image_processor::{init_thread_pool, ImageProcessor};
 use crate::models::{ProcessingResult, ProgressPhase, ProgressUpdate};
 use crate::utils::constants::*;
 use fltk::{
     app,
-    button::Button,
+    button::{Button, CheckButton},
     dialog,
     enums::{Align, Color, FrameType},
     frame::Frame,
@@ -56,6 +57,7 @@ struct AppState {
     file_list: Vec<String>,
     output_path: String,
     canvas_width: u32,
+    max_performance: bool,
     config: AppConfig,
 }
 
@@ -71,6 +73,7 @@ impl AppState {
             file_list: Vec::new(),
             output_path: String::new(),
             canvas_width,
+            max_performance: false,
             config,
         }
     }
@@ -116,7 +119,7 @@ pub fn run() {
 
     // ── 2. 設定セクション ────────────────────────────────────────────────
     let mut section2 = Frame::default()
-        .with_size(WINDOW_WIDTH - 20, 75)
+        .with_size(WINDOW_WIDTH - 20, 105)
         .with_pos(10, 95)
         .with_label("2. 設定");
     section2.set_align(Align::TopLeft | Align::Inside);
@@ -147,22 +150,28 @@ pub fn run() {
         ));
     lbl_height.set_align(Align::Left | Align::Inside);
 
+    let mut chk_max_performance = CheckButton::default()
+        .with_size(WINDOW_WIDTH - 40, 25)
+        .with_pos(20, 171)
+        .with_label("最大性能モードを有効化（全 CPU コアを使用）");
+    chk_max_performance.set_value(false);
+
     // ── 3. 出力セクション ────────────────────────────────────────────────
     let mut section3 = Frame::default()
         .with_size(WINDOW_WIDTH - 20, 100)
-        .with_pos(10, 180)
+        .with_pos(10, 210)
         .with_label("3. 出力");
     section3.set_align(Align::TopLeft | Align::Inside);
     section3.set_frame(FrameType::EngravedBox);
 
     let mut btn_output = Button::default()
         .with_size(140, 28)
-        .with_pos(20, 200)
+        .with_pos(20, 230)
         .with_label("保存先を選択");
 
     let mut lbl_output = Frame::default()
         .with_size(390, 28)
-        .with_pos(170, 200)
+        .with_pos(170, 230)
         .with_label("未選択");
     lbl_output.set_align(Align::Left | Align::Inside);
     lbl_output.set_frame(FrameType::FlatBox);
@@ -170,7 +179,7 @@ pub fn run() {
 
     let mut btn_run = Button::default()
         .with_size(200, 32)
-        .with_pos((WINDOW_WIDTH - 200) / 2, 242)
+        .with_pos((WINDOW_WIDTH - 200) / 2, 272)
         .with_label("PDF 生成を実行");
     btn_run.set_color(Color::from_rgb(70, 130, 180));
     btn_run.set_label_color(Color::White);
@@ -179,14 +188,14 @@ pub fn run() {
     // ── 4. 進捗セクション ────────────────────────────────────────────────
     let mut section4 = Frame::default()
         .with_size(WINDOW_WIDTH - 20, 90)
-        .with_pos(10, 292)
+        .with_pos(10, 322)
         .with_label("4. 進捗");
     section4.set_align(Align::TopLeft | Align::Inside);
     section4.set_frame(FrameType::EngravedBox);
 
     let mut progress_bar = Progress::default()
         .with_size(WINDOW_WIDTH - 40, 28)
-        .with_pos(20, 313);
+        .with_pos(20, 343);
     progress_bar.set_minimum(0.0);
     progress_bar.set_maximum(100.0);
     progress_bar.set_value(0.0);
@@ -195,7 +204,7 @@ pub fn run() {
 
     let mut lbl_status = Frame::default()
         .with_size(WINDOW_WIDTH - 40, 25)
-        .with_pos(20, 345)
+        .with_pos(20, 375)
         .with_label("待機中");
     lbl_status.set_align(Align::Left | Align::Inside);
 
@@ -311,17 +320,26 @@ pub fn run() {
         });
     }
 
+    // ── コールバック: 最大性能モード ─────────────────────────────────────
+    {
+        let state_c = Arc::clone(&state);
+        chk_max_performance.set_callback(move |chk| {
+            state_c.lock().unwrap().max_performance = chk.value();
+        });
+    }
+
     // ── コールバック: PDF 生成 ───────────────────────────────────────────
     {
         let state_c = Arc::clone(&state);
         let sender_c = sender.clone();
-        btn_run.set_callback(move |_| {
-            let (file_list, canvas_width, output_path) = {
+        btn_run.set_callback(move |btn| {
+            let (file_list, canvas_width, output_path, max_performance) = {
                 let s = state_c.lock().unwrap();
                 (
                     s.file_list.clone(),
                     s.canvas_width,
                     s.output_path.clone(),
+                    s.max_performance,
                 )
             };
 
@@ -333,6 +351,13 @@ pub fn run() {
                 dialog::alert_default("保存先が選択されていません。");
                 return;
             }
+
+            // 最大性能モードを反映してスレッドプールを初期化する
+            // （初回のみ有効。以降の呼び出しは rayon により無視される）
+            ImageProcessor::set_max_performance_mode(max_performance);
+            init_thread_pool();
+
+            btn.deactivate();
 
             // 進捗チャネル
             let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>();
