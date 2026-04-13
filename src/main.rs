@@ -33,11 +33,8 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        image_processor::ImageProcessor::set_max_performance_mode(false);
-        // GUI モードでは従来どおり 70% 設定で初期化する
-        image_processor::init_thread_pool();
-
-        // GUI モード: 引数なし（または不足）のとき FLTK を起動
+        // GUI モード: スレッドプールの初期化はユーザーの性能設定確定後に
+        // GUI の実行コールバック内で行うため、ここでは初期化しない
         gui::run();
     }
 }
