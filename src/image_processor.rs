@@ -3,10 +3,9 @@ use crate::utils::constants::*;
 use image::RgbImage;
 use rayon::prelude::*;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 const PROJECT_TOOLS_DIR: &str = "tools";
 #[cfg(windows)]
@@ -146,24 +145,17 @@ impl ImageProcessor {
     /// 単一の JPEG 画像を読み込み、A4 比率に収まるようリサイズして返す
     ///
     /// 処理フロー:
-    /// 1. 画像読み込み
-    /// 2. RGB 色空間に変換
-    /// 3. アスペクト比保持でリサイズ
+    /// 1. 画像デコード（zune-jpeg）
+    /// 2. アスペクト比保持でリサイズ（fast_image_resize / Lanczos3）
     pub fn process_single_image(
         file_path: &Path,
         canvas_w: u32,
         canvas_h: u32,
     ) -> Result<RgbImage, ProcessingError> {
-        // 1. 画像読み込み
-        let img = image::open(file_path).map_err(|e| ProcessingError {
-            file_path: file_path.to_string_lossy().to_string(),
-            message: format!("Failed to load image: {e}"),
-        })?;
+        // 1. 画像デコード
+        let img_rgb = Self::decode_image(file_path)?;
 
-        // 2. RGB 色空間に変換
-        let img_rgb = img.to_rgb8();
-
-        // 3. アスペクト比保持でリサイズ
+        // 2. アスペクト比保持でリサイズ
         let (orig_w, orig_h) = (img_rgb.width(), img_rgb.height());
         let scale = f32::min(
             canvas_w as f32 / orig_w as f32,
@@ -172,18 +164,75 @@ impl ImageProcessor {
         let new_w = ((orig_w as f32 * scale) + 0.5) as u32;
         let new_h = ((orig_h as f32 * scale) + 0.5) as u32;
 
-        let img_resized = image::imageops::resize(
-            &img_rgb,
-            new_w,
-            new_h,
-            image::imageops::FilterType::Lanczos3,
-        );
-
-        // 4. 白背景は PDF ページ側に任せ、画像本体だけ返す
-        Ok(img_resized)
+        // 白背景は PDF ページ側に任せ、画像本体だけ返す
+        Self::resize_image(img_rgb, new_w, new_h).map_err(|msg| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: msg,
+        })
     }
 
-    /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする
+    /// zune-jpeg を使って JPEG をデコードする
+    fn decode_image(file_path: &Path) -> Result<RgbImage, ProcessingError> {
+        use zune_jpeg::zune_core::bytestream::ZCursor;
+        use zune_jpeg::zune_core::colorspace::ColorSpace;
+        use zune_jpeg::zune_core::options::DecoderOptions;
+        use zune_jpeg::JpegDecoder;
+
+        let jpeg_bytes = std::fs::read(file_path).map_err(|e| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("Failed to read file: {e}"),
+        })?;
+
+        let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(jpeg_bytes), options);
+
+        decoder.decode_headers().map_err(|e| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("zune-jpeg header decode failed: {e:?}"),
+        })?;
+
+        let info = decoder.info().ok_or_else(|| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: "zune-jpeg: failed to get image info after decoding headers".to_string(),
+        })?;
+        let (width, height) = (info.width as u32, info.height as u32);
+
+        let pixels = decoder.decode().map_err(|e| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("zune-jpeg decode failed: {e:?}"),
+        })?;
+
+        RgbImage::from_raw(width, height, pixels).ok_or_else(|| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: "zune-jpeg: pixel buffer size does not match image dimensions".to_string(),
+        })
+    }
+
+    /// fast_image_resize クレートの Lanczos3 フィルタでリサイズする
+    fn resize_image(img: RgbImage, new_w: u32, new_h: u32) -> Result<RgbImage, String> {
+        use fast_image_resize::images::Image;
+        use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+
+        let (orig_w, orig_h) = (img.width(), img.height());
+        let raw = img.into_raw();
+        let src = Image::from_vec_u8(orig_w, orig_h, raw, PixelType::U8x3)
+            .map_err(|e| format!("fast_image_resize: failed to create source image: {e}"))?;
+        let mut dst = Image::new(new_w, new_h, PixelType::U8x3);
+
+        let mut resizer = Resizer::new();
+        resizer
+            .resize(
+                &src,
+                &mut dst,
+                &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)),
+            )
+            .map_err(|e| format!("fast_image_resize: resize failed: {e}"))?;
+
+        RgbImage::from_raw(new_w, new_h, dst.buffer().to_vec())
+            .ok_or_else(|| "fast_image_resize: pixel buffer size does not match dimensions".to_string())
+    }
+
+    /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする（image クレート使用）
     pub fn encode_jpeg(img: &RgbImage) -> Result<Vec<u8>, String> {
         use image::codecs::jpeg::JpegEncoder;
         let mut jpeg_bytes: Vec<u8> = Vec::new();

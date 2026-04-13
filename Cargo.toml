@@ -11,6 +11,12 @@ path = "src/main.rs"
 # 画像処理
 image = "0.24"
 
+# 高速リサイズ (SIMD 加速 Lanczos3)
+fast_image_resize = "6"
+
+# 純 Rust JPEG デコーダ
+zune-jpeg = "0.5"
+
 # PDF生成
 pdf-writer = "0.11"
 
