@@ -164,7 +164,7 @@ impl ImageProcessor {
         let new_w = ((orig_w as f32 * scale) + 0.5) as u32;
         let new_h = ((orig_h as f32 * scale) + 0.5) as u32;
 
-        // 3. 白背景は PDF ページ側に任せ、画像本体だけ返す
+        // 白背景は PDF ページ側に任せ、画像本体だけ返す
         Self::resize_image(img_rgb, new_w, new_h).map_err(|msg| ProcessingError {
             file_path: file_path.to_string_lossy().to_string(),
             message: msg,
