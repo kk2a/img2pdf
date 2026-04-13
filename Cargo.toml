@@ -7,31 +7,15 @@ edition = "2024"
 name = "img2pdf"
 path = "src/main.rs"
 
-[features]
-## fast_image_resize を使ったリサイズバックエンドを有効にする。
-## 有効化後、環境変数 IMG2PDF_RESIZE_BACKEND=fast_image_resize でランタイム切り替え可能。
-fast-image-resize-backend = ["dep:fast_image_resize"]
-
-## turbojpeg (libjpeg-turbo) を使った JPEG エンコード/デコードバックエンドを有効にする。
-## 有効化後、環境変数 IMG2PDF_JPEG_BACKEND=turbojpeg でランタイム切り替え可能。
-turbojpeg-backend = ["dep:turbojpeg"]
-
-## zune-jpeg を使った JPEG デコードバックエンドを有効にする（エンコードは image クレートを使用）。
-## 有効化後、環境変数 IMG2PDF_JPEG_BACKEND=zune_jpeg でランタイム切り替え可能。
-zune-jpeg-backend = ["dep:zune-jpeg"]
-
 [dependencies]
 # 画像処理
 image = "0.24"
 
-# 高速リサイズ（オプション、fast-image-resize-backend フィーチャで有効化）
-fast_image_resize = { version = "6", optional = true }
+# 高速リサイズ (SIMD 加速 Lanczos3)
+fast_image_resize = "6"
 
-# libjpeg-turbo バインディング（オプション、turbojpeg-backend フィーチャで有効化）
-turbojpeg = { version = "1.4", features = ["image"], optional = true }
-
-# 純 Rust JPEG デコーダ（オプション、zune-jpeg-backend フィーチャで有効化）
-zune-jpeg = { version = "0.5", optional = true }
+# 純 Rust JPEG デコーダ
+zune-jpeg = "0.5"
 
 # PDF生成
 pdf-writer = "0.11"
