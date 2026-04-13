@@ -36,20 +36,30 @@ enum JpegBackend {
 }
 
 /// 環境変数 `IMG2PDF_RESIZE_BACKEND` を読んでリサイズバックエンドを返す
+///
+/// 結果はプロセス起動時に一度だけ評価され、以降はキャッシュされた値を返す。
 fn resize_backend() -> ResizeBackend {
-    match std::env::var("IMG2PDF_RESIZE_BACKEND").as_deref() {
-        Ok("fast_image_resize") => ResizeBackend::FastImageResize,
-        _ => ResizeBackend::Image,
-    }
+    static CACHED: std::sync::LazyLock<ResizeBackend> = std::sync::LazyLock::new(|| {
+        match std::env::var("IMG2PDF_RESIZE_BACKEND").as_deref() {
+            Ok("fast_image_resize") => ResizeBackend::FastImageResize,
+            _ => ResizeBackend::Image,
+        }
+    });
+    *CACHED
 }
 
 /// 環境変数 `IMG2PDF_JPEG_BACKEND` を読んで JPEG バックエンドを返す
+///
+/// 結果はプロセス起動時に一度だけ評価され、以降はキャッシュされた値を返す。
 fn jpeg_backend() -> JpegBackend {
-    match std::env::var("IMG2PDF_JPEG_BACKEND").as_deref() {
-        Ok("turbojpeg") => JpegBackend::Turbojpeg,
-        Ok("zune_jpeg") => JpegBackend::ZuneJpeg,
-        _ => JpegBackend::Image,
-    }
+    static CACHED: std::sync::LazyLock<JpegBackend> = std::sync::LazyLock::new(|| {
+        match std::env::var("IMG2PDF_JPEG_BACKEND").as_deref() {
+            Ok("turbojpeg") => JpegBackend::Turbojpeg,
+            Ok("zune_jpeg") => JpegBackend::ZuneJpeg,
+            _ => JpegBackend::Image,
+        }
+    });
+    *CACHED
 }
 
 const PROJECT_TOOLS_DIR: &str = "tools";
@@ -255,7 +265,7 @@ impl ImageProcessor {
         Err(ProcessingError {
             file_path: file_path.to_string_lossy().to_string(),
             message: "turbojpeg backend is not compiled in. \
-                      Rebuild with --features turbojpeg-backend"
+                      Rebuild with `cargo build --features turbojpeg-backend`"
                 .to_string(),
         })
     }
@@ -306,7 +316,7 @@ impl ImageProcessor {
         Err(ProcessingError {
             file_path: file_path.to_string_lossy().to_string(),
             message: "zune-jpeg backend is not compiled in. \
-                      Rebuild with --features zune-jpeg-backend"
+                      Rebuild with `cargo build --features zune-jpeg-backend`"
                 .to_string(),
         })
     }
@@ -360,7 +370,7 @@ impl ImageProcessor {
     ) -> Result<RgbImage, String> {
         Err(
             "fast_image_resize backend is not compiled in. \
-             Rebuild with --features fast-image-resize-backend"
+             Rebuild with `cargo build --features fast-image-resize-backend`"
                 .to_string(),
         )
     }
@@ -401,7 +411,7 @@ impl ImageProcessor {
     fn encode_jpeg_turbojpeg(_img: &RgbImage) -> Result<Vec<u8>, String> {
         Err(
             "turbojpeg backend is not compiled in. \
-             Rebuild with --features turbojpeg-backend"
+             Rebuild with `cargo build --features turbojpeg-backend`"
                 .to_string(),
         )
     }
