@@ -2,16 +2,17 @@ use crate::models::{ProcessingError, ProcessingResult, ProgressPhase, ProgressUp
 use crate::utils::constants::*;
 use image::RgbImage;
 use rayon::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const PROJECT_TOOLS_DIR: &str = "tools";
-#[cfg(windows)]
-const JPEGTRAN_TOOL_NAME: &str = "jpegtran.exe";
-#[cfg(not(windows))]
-const JPEGTRAN_TOOL_NAME: &str = "jpegtran";
+const JPEGTRAN_TOOL_NAMES: &[&str] = if cfg!(windows) {
+    &["jpegtran.exe", "jpegtran"]
+} else {
+    &["jpegtran", "jpegtran.exe"]
+};
 
 static MAX_PERFORMANCE_MODE: AtomicBool = AtomicBool::new(false);
 
@@ -74,66 +75,90 @@ impl ImageProcessor {
         ((width as f32 * A4_RATIO) + 0.5) as u32
     }
 
+    /// 利用可能な jpegtran を探す。
+    ///
+    /// 優先順は `tools/` 配下、プロジェクト直下、PATH 上の実行ファイル。
+    pub fn find_jpegtran() -> Option<PathBuf> {
+        static JPEGTRAN_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+        JPEGTRAN_PATH
+            .get_or_init(|| {
+                let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+                for tool_name in JPEGTRAN_TOOL_NAMES {
+                    for dir in [
+                        manifest_dir.join(PROJECT_TOOLS_DIR),
+                        manifest_dir.to_path_buf(),
+                    ] {
+                        let candidate = dir.join(tool_name);
+                        if candidate.is_file() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+
+                std::env::var_os("PATH").and_then(|paths| {
+                    std::env::split_paths(&paths).find_map(|dir| {
+                        JPEGTRAN_TOOL_NAMES.iter().find_map(|tool_name| {
+                            let candidate = dir.join(tool_name);
+                            if candidate.is_file() {
+                                Some(candidate)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                })
+            })
+            .clone()
+    }
+
     /// JPEG を可逆最適化する（量子化は維持、ハフマン最適化のみ）
     ///
-    /// - `tools/jpegtran(.exe)` がない、または失敗時は入力をそのまま返す
+    /// - jpegtran がない、または失敗時は入力をそのまま返す
     /// - サイズが小さくならない場合も、入力をそのまま返す
     fn optimize_jpeg_lossless(jpeg_bytes: Vec<u8>) -> Vec<u8> {
-        use std::process::Command;
-        use std::process::Stdio;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::io::Write;
+        use std::process::{Command, Stdio};
 
-        let jpegtran_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(PROJECT_TOOLS_DIR)
-            .join(JPEGTRAN_TOOL_NAME);
-        if !jpegtran_path.exists() {
+        let Some(jpegtran_path) = Self::find_jpegtran() else {
             return jpeg_bytes;
-        }
+        };
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp_dir = std::env::temp_dir();
-        let input_path = tmp_dir.join(format!("img2pdf_jpegtran_in_{unique}.jpg"));
-        let output_path = tmp_dir.join(format!("img2pdf_jpegtran_out_{unique}.jpg"));
-
-        if std::fs::write(&input_path, &jpeg_bytes).is_err() {
-            return jpeg_bytes;
-        }
-
-        let status = match Command::new(&jpegtran_path)
+        let mut child = match Command::new(jpegtran_path)
             .args(["-copy", "none", "-optimize"])
-            .arg(&input_path)
-            .arg(&output_path)
-            .stdout(Stdio::null())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()
+            .spawn()
         {
-            Ok(s) => s,
-            Err(_e) => {
-                let _ = std::fs::remove_file(&input_path);
-                return jpeg_bytes;
-            }
+            Ok(child) => child,
+            Err(_) => return jpeg_bytes,
         };
 
-        if !status.success() {
-            let _ = std::fs::remove_file(&input_path);
-            let _ = std::fs::remove_file(&output_path);
+        let Some(stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
             return jpeg_bytes;
-        }
-
-        let output = match std::fs::read(&output_path) {
-            Ok(bytes) => bytes,
-            Err(_e) => {
-                let _ = std::fs::remove_file(&input_path);
-                let _ = std::fs::remove_file(&output_path);
-                return jpeg_bytes;
-            }
         };
 
-        let _ = std::fs::remove_file(&input_path);
-        let _ = std::fs::remove_file(&output_path);
+        let output = std::thread::scope(|scope| {
+            let input = &jpeg_bytes;
+            let writer = scope.spawn(move || {
+                let mut stdin = stdin;
+                stdin.write_all(input)
+            });
+            let output = child.wait_with_output();
+            let write_ok = writer.join().map(|r| r.is_ok()).unwrap_or(false);
+            if write_ok {
+                output.ok()
+            } else {
+                None
+            }
+        });
+
+        let output = match output {
+            Some(output) if output.status.success() => output.stdout,
+            _ => return jpeg_bytes,
+        };
 
         if output.len() < jpeg_bytes.len() {
             output
@@ -228,8 +253,9 @@ impl ImageProcessor {
             )
             .map_err(|e| format!("fast_image_resize: resize failed: {e}"))?;
 
-        RgbImage::from_raw(new_w, new_h, dst.buffer().to_vec())
-            .ok_or_else(|| "fast_image_resize: pixel buffer size does not match dimensions".to_string())
+        RgbImage::from_raw(new_w, new_h, dst.buffer().to_vec()).ok_or_else(|| {
+            "fast_image_resize: pixel buffer size does not match dimensions".to_string()
+        })
     }
 
     /// `RgbImage` を JPEG バイト列（quality=`PDF_QUALITY`）にエンコードする（image クレート使用）
@@ -305,11 +331,8 @@ impl ImageProcessor {
             .par_iter()
             .enumerate()
             .map(|(idx, file_path)| {
-                let result = Self::process_and_encode(
-                    Path::new(file_path),
-                    canvas_width,
-                    canvas_height,
-                );
+                let result =
+                    Self::process_and_encode(Path::new(file_path), canvas_width, canvas_height);
 
                 // ロックフリーで進捗カウンタをインクリメント
                 if let Some(ref tx) = progress_tx {
@@ -419,9 +442,7 @@ impl ImageProcessor {
         let catalog_id = Ref::new(1);
         let page_tree_id = Ref::new(2);
         let base = 3_i32;
-        let page_ids: Vec<Ref> = (0..total)
-            .map(|i| Ref::new(base + i as i32))
-            .collect();
+        let page_ids: Vec<Ref> = (0..total).map(|i| Ref::new(base + i as i32)).collect();
         let image_ids: Vec<Ref> = (0..total)
             .map(|i| Ref::new(base + total as i32 + i as i32))
             .collect();
@@ -499,7 +520,11 @@ mod tests {
     fn make_jpeg_page(width: u32, height: u32, color: [u8; 3]) -> JpegPage {
         let img = make_test_image(width, height, color);
         let data = ImageProcessor::encode_jpeg(&img).expect("encode failed");
-        JpegPage { width, height, data }
+        JpegPage {
+            width,
+            height,
+            data,
+        }
     }
 
     #[test]
@@ -553,7 +578,11 @@ mod tests {
 
         // ランダムっぽいパターンの画像（圧縮率の差が出やすい）
         let img: RgbImage = ImageBuffer::from_fn(200, 200, |x, y| {
-            Rgb([(x * 3 % 256) as u8, (y * 5 % 256) as u8, ((x + y) % 256) as u8])
+            Rgb([
+                (x * 3 % 256) as u8,
+                (y * 5 % 256) as u8,
+                ((x + y) % 256) as u8,
+            ])
         });
 
         let mut low_q: Vec<u8> = Vec::new();
@@ -592,8 +621,7 @@ mod tests {
         // 小さめのテスト画像 (200x283 ≈ A4比率)
         let (page_w, page_h) = (200u32, 283u32);
         let page = make_jpeg_page(page_w, page_h, [240, 240, 240]);
-        ImageProcessor::generate_pdf(vec![page], &path_str, page_w)
-            .expect("PDF generation failed");
+        ImageProcessor::generate_pdf(vec![page], &path_str, page_w).expect("PDF generation failed");
 
         let pdf_size = std::fs::metadata(&tmp).unwrap().len();
         let raw_rgb_size = (page_w as u64 * page_h as u64 * 3) as u64;
@@ -625,8 +653,7 @@ mod tests {
             make_jpeg_page(200, 283, [0, 255, 0]),
             make_jpeg_page(200, 283, [0, 0, 255]),
         ];
-        ImageProcessor::generate_pdf(pages, &path_str, 200)
-            .expect("PDF generation failed");
+        ImageProcessor::generate_pdf(pages, &path_str, 200).expect("PDF generation failed");
 
         let content = std::fs::read(&tmp).unwrap();
         assert!(content.starts_with(b"%PDF"), "Output should be valid PDF");

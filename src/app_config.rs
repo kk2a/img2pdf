@@ -41,6 +41,16 @@ impl AppConfig {
         }
     }
 
+    /// 最後に使用した入力ディレクトリを返す
+    pub fn get_last_input_dir(&self) -> &str {
+        &self.data.last_input_dir
+    }
+
+    /// 最後に使用した入力ディレクトリを更新する
+    pub fn set_last_input_dir(&mut self, dir: String) {
+        self.data.last_input_dir = dir;
+    }
+
     /// 最後に使用した保存ディレクトリを返す
     pub fn get_last_save_dir(&self) -> &str {
         &self.data.last_save_dir

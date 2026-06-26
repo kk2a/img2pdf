@@ -29,4 +29,4 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg"];
 pub const WINDOW_WIDTH: i32 = 600;
 
 /// GUIウィンドウ高さ
-pub const WINDOW_HEIGHT: i32 = 530;
+pub const WINDOW_HEIGHT: i32 = 420;

@@ -5,12 +5,12 @@
 //! ┌─ 1. 入力 ─────────────────────────────┐
 //! │ [フォルダを選択] [ファイルを追加]       │
 //! │ 対象ファイル数: 0 枚                   │
-//! ├─ 2. 設定 ─────────────────────────────┤
+//! ├─ 2. 出力 ─────────────────────────────┤
+//! │ [保存先を選択] [未選択................] │
+//! ├─ 3. 設定 ─────────────────────────────┤
 //! │ キャンバス幅 (px): [1654]             │
 //! │ キャンバス高さ: 2339 px               │
 //! │ [✓] 最大性能モードを有効化            │
-//! ├─ 3. 出力 ─────────────────────────────┤
-//! │ [保存先を選択] [未選択................] │
 //! │              [PDF 生成を実行]          │
 //! ├─ 4. 進捗 ─────────────────────────────┤
 //! │ [████████░░░░░░░░░░░] 50%            │
@@ -117,17 +117,38 @@ pub fn run() {
         .with_label("対象ファイル数: 0 枚");
     lbl_file_count.set_align(Align::Left | Align::Inside);
 
-    // ── 2. 設定セクション ────────────────────────────────────────────────
+    // ── 2. 出力セクション ────────────────────────────────────────────────
     let mut section2 = Frame::default()
-        .with_size(WINDOW_WIDTH - 20, 105)
+        .with_size(WINDOW_WIDTH - 20, 70)
         .with_pos(10, 95)
-        .with_label("2. 設定");
+        .with_label("2. 出力");
     section2.set_align(Align::TopLeft | Align::Inside);
     section2.set_frame(FrameType::EngravedBox);
 
+    let mut btn_output = Button::default()
+        .with_size(140, 28)
+        .with_pos(20, 120)
+        .with_label("保存先を選択");
+
+    let mut lbl_output = Frame::default()
+        .with_size(390, 28)
+        .with_pos(170, 120)
+        .with_label("未選択");
+    lbl_output.set_align(Align::Left | Align::Inside);
+    lbl_output.set_frame(FrameType::FlatBox);
+    lbl_output.set_color(Color::from_rgb(230, 230, 230));
+
+    // ── 3. 設定セクション ────────────────────────────────────────────────
+    let mut section3 = Frame::default()
+        .with_size(WINDOW_WIDTH - 20, 135)
+        .with_pos(10, 175)
+        .with_label("3. 設定");
+    section3.set_align(Align::TopLeft | Align::Inside);
+    section3.set_frame(FrameType::EngravedBox);
+
     let mut lbl_width = Frame::default()
         .with_size(170, 25)
-        .with_pos(20, 115)
+        .with_pos(20, 200)
         .with_label("キャンバス幅 (px):");
     lbl_width.set_align(Align::Left | Align::Inside);
 
@@ -136,14 +157,12 @@ pub fn run() {
         s.canvas_width
     };
 
-    let mut input_width = IntInput::default()
-        .with_size(100, 25)
-        .with_pos(195, 115);
+    let mut input_width = IntInput::default().with_size(100, 25).with_pos(195, 200);
     input_width.set_value(&initial_width.to_string());
 
     let mut lbl_height = Frame::default()
         .with_size(WINDOW_WIDTH - 40, 25)
-        .with_pos(20, 143)
+        .with_pos(20, 228)
         .with_label(&format!(
             "キャンバス高さ: {} px",
             ImageProcessor::calculate_height(initial_width)
@@ -152,34 +171,13 @@ pub fn run() {
 
     let mut chk_max_performance = CheckButton::default()
         .with_size(WINDOW_WIDTH - 40, 25)
-        .with_pos(20, 171)
+        .with_pos(20, 254)
         .with_label("最大性能モードを有効化（全 CPU コアを使用）");
     chk_max_performance.set_value(false);
 
-    // ── 3. 出力セクション ────────────────────────────────────────────────
-    let mut section3 = Frame::default()
-        .with_size(WINDOW_WIDTH - 20, 100)
-        .with_pos(10, 210)
-        .with_label("3. 出力");
-    section3.set_align(Align::TopLeft | Align::Inside);
-    section3.set_frame(FrameType::EngravedBox);
-
-    let mut btn_output = Button::default()
-        .with_size(140, 28)
-        .with_pos(20, 230)
-        .with_label("保存先を選択");
-
-    let mut lbl_output = Frame::default()
-        .with_size(390, 28)
-        .with_pos(170, 230)
-        .with_label("未選択");
-    lbl_output.set_align(Align::Left | Align::Inside);
-    lbl_output.set_frame(FrameType::FlatBox);
-    lbl_output.set_color(Color::from_rgb(230, 230, 230));
-
     let mut btn_run = Button::default()
         .with_size(200, 32)
-        .with_pos((WINDOW_WIDTH - 200) / 2, 272)
+        .with_pos((WINDOW_WIDTH - 200) / 2, 273)
         .with_label("PDF 生成を実行");
     btn_run.set_color(Color::from_rgb(70, 130, 180));
     btn_run.set_label_color(Color::White);
@@ -188,14 +186,14 @@ pub fn run() {
     // ── 4. 進捗セクション ────────────────────────────────────────────────
     let mut section4 = Frame::default()
         .with_size(WINDOW_WIDTH - 20, 90)
-        .with_pos(10, 322)
+        .with_pos(10, 320)
         .with_label("4. 進捗");
     section4.set_align(Align::TopLeft | Align::Inside);
     section4.set_frame(FrameType::EngravedBox);
 
     let mut progress_bar = Progress::default()
         .with_size(WINDOW_WIDTH - 40, 28)
-        .with_pos(20, 343);
+        .with_pos(20, 342);
     progress_bar.set_minimum(0.0);
     progress_bar.set_maximum(100.0);
     progress_bar.set_value(0.0);
@@ -204,7 +202,7 @@ pub fn run() {
 
     let mut lbl_status = Frame::default()
         .with_size(WINDOW_WIDTH - 40, 25)
-        .with_pos(20, 375)
+        .with_pos(20, 374)
         .with_label("待機中");
     lbl_status.set_align(Align::Left | Align::Inside);
 
@@ -216,27 +214,42 @@ pub fn run() {
         let state_c = Arc::clone(&state);
         let sender_c = sender.clone();
         btn_folder.set_callback(move |_| {
-            let chosen = dialog::dir_chooser("処理するフォルダを選択してください", "", false);
-            if let Some(folder) = chosen {
-                if !folder.is_empty() {
-                    let mut files = collect_jpeg_files(Path::new(&folder));
-                    files.sort_by(|a, b| {
-                        let a_name = Path::new(a)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_lowercase();
-                        let b_name = Path::new(b)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_lowercase();
-                        a_name.cmp(&b_name)
-                    });
-                    let count = files.len();
-                    state_c.lock().unwrap().file_list = files;
-                    sender_c.send(AppMessage::FilesUpdated(count));
+            let initial_dir = {
+                let s = state_c.lock().unwrap();
+                s.config.get_last_input_dir().to_string()
+            };
+            let mut chooser =
+                dialog::NativeFileChooser::new(dialog::NativeFileChooserType::BrowseDir);
+            chooser.set_title("処理するフォルダを選択してください");
+            if !initial_dir.is_empty() {
+                let _ = chooser.set_directory(&initial_dir);
+            }
+            chooser.show();
+
+            let folder = chooser.filename().to_string_lossy().to_string();
+            if !folder.is_empty() {
+                let mut files = collect_jpeg_files(Path::new(&folder));
+                files.sort_by(|a, b| {
+                    let a_name = Path::new(a)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase();
+                    let b_name = Path::new(b)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase();
+                    a_name.cmp(&b_name)
+                });
+                let count = files.len();
+                {
+                    let mut s = state_c.lock().unwrap();
+                    s.config.set_last_input_dir(folder.clone());
+                    s.config.save();
+                    s.file_list = files;
                 }
+                sender_c.send(AppMessage::FilesUpdated(count));
             }
         });
     }
@@ -402,7 +415,8 @@ pub fn run() {
                     {
                         let mut s = state.lock().unwrap();
                         if let Some(dir) = Path::new(&path).parent() {
-                            s.config.set_last_save_dir(dir.to_string_lossy().to_string());
+                            s.config
+                                .set_last_save_dir(dir.to_string_lossy().to_string());
                             s.config.save();
                         }
                         s.output_path = path;
@@ -440,9 +454,7 @@ pub fn run() {
                     if result.success {
                         let msg = format!(
                             "PDF を保存しました。\n成功: {} 枚 / エラー: {} 枚\n保存先: {}",
-                            result.success_count,
-                            result.error_count,
-                            result.output_path
+                            result.success_count, result.error_count, result.output_path
                         );
                         lbl_status.set_label("完了");
                         dialog::message_default(&msg);
@@ -452,10 +464,7 @@ pub fn run() {
                             .iter()
                             .map(|e| format!("  {}: {}", e.file_path, e.message))
                             .collect();
-                        let msg = format!(
-                            "処理に失敗しました。\n\n{}",
-                            error_details.join("\n")
-                        );
+                        let msg = format!("処理に失敗しました。\n\n{}", error_details.join("\n"));
                         lbl_status.set_label("エラー");
                         dialog::alert_default(&msg);
                     }
