@@ -7,9 +7,8 @@ mod tests {
     use image::{ImageBuffer, Rgb, RgbImage};
     use img2pdf::image_processor::{calc_worker_threads, ImageProcessor};
     use img2pdf::utils::constants::A4_RATIO;
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     // ─── calculate_height ───────────────────────────────────────────────
 
@@ -49,7 +48,10 @@ mod tests {
             .map(|n| n.get())
             .unwrap_or(1);
         assert!(n >= 1, "Thread count must be at least 1");
-        assert!(n <= cpu_count, "Thread count ({n}) must not exceed CPU count ({cpu_count})");
+        assert!(
+            n <= cpu_count,
+            "Thread count ({n}) must not exceed CPU count ({cpu_count})"
+        );
     }
 
     // ─── CLI 引数解析 ────────────────────────────────────────────────────
@@ -61,10 +63,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_one_arg_returns_none() {
+    fn test_cli_parse_one_arg_uses_default_output() {
         use img2pdf::cli::parse_args;
         let args = vec!["folder".to_string()];
-        assert!(parse_args(&args).is_none());
+        let parsed = parse_args(&args).expect("one input arg should use default output path");
+        assert_eq!(parsed.input_folder, "folder");
+        assert!(parsed.output_path.ends_with(".pdf"));
     }
 
     #[test]
@@ -94,20 +98,9 @@ mod tests {
     // ─── jpegtran 最小疎通 ─────────────────────────────────────────────
     // jpegtran バイナリが配置されていない場合はスキップする。
 
-    fn find_jpegtran() -> Option<PathBuf> {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidates = [
-            base.join("tools").join("jpegtran.exe"),
-            base.join("tools").join("jpegtran"),
-            base.join("jpegtran.exe"),
-            base.join("jpegtran"),
-        ];
-        candidates.into_iter().find(|p| p.exists())
-    }
-
     #[test]
     fn test_jpegtran_lossless_minimal_smoke() {
-        let Some(jpegtran) = find_jpegtran() else {
+        let Some(jpegtran) = ImageProcessor::find_jpegtran() else {
             eprintln!("jpegtran が見つかりません。テストをスキップします。");
             return;
         };
@@ -119,36 +112,39 @@ mod tests {
             .encode_image(&img)
             .expect("failed to create input jpeg");
 
-        // jpegtran はこの環境では input/output ファイル指定が必要
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp = std::env::temp_dir();
-        let in_path = tmp.join(format!("img2pdf_smoke_in_{unique}.jpg"));
-        let out_path = tmp.join(format!("img2pdf_smoke_out_{unique}.jpg"));
-        std::fs::write(&in_path, &input_jpeg).expect("failed to write input jpeg");
-
-        let out = Command::new(jpegtran)
+        let mut child = Command::new(jpegtran)
             .args(["-copy", "none", "-optimize"])
-            .arg(&in_path)
-            .arg(&out_path)
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("failed to run jpegtran");
+        let stdin = child.stdin.take().expect("failed to open jpegtran stdin");
+        let out = std::thread::scope(|scope| {
+            let input = &input_jpeg;
+            let writer = scope.spawn(move || {
+                let mut stdin = stdin;
+                stdin.write_all(input)
+            });
+            let out = child
+                .wait_with_output()
+                .expect("failed to read jpegtran output");
+            writer
+                .join()
+                .expect("failed to join jpegtran stdin writer")
+                .expect("failed to write jpegtran stdin");
+            out
+        });
 
         assert!(
             out.status.success(),
             "jpegtran failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let out_bytes = std::fs::read(&out_path).expect("failed to read jpegtran output file");
-        assert!(!out_bytes.is_empty(), "jpegtran output is empty");
+        assert!(!out.stdout.is_empty(), "jpegtran output is empty");
         assert!(
-            out_bytes.starts_with(&[0xFF, 0xD8]),
+            out.stdout.starts_with(&[0xFF, 0xD8]),
             "jpegtran output is not JPEG"
         );
-
-        let _ = std::fs::remove_file(&in_path);
-        let _ = std::fs::remove_file(&out_path);
     }
 }
