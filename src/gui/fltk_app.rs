@@ -395,6 +395,7 @@ pub fn run() {
                 file_list,
                 canvas_width,
                 output_path,
+                false,
                 Some(progress_tx),
                 finished_tx,
             );

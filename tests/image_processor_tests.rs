@@ -5,7 +5,7 @@
 mod tests {
     use image::codecs::jpeg::JpegEncoder;
     use image::{ImageBuffer, Rgb, RgbImage};
-    use img2pdf::image_processor::{calc_worker_threads, ImageProcessor};
+    use img2pdf::image_processor::{ImageProcessor, calc_worker_threads};
     use img2pdf::utils::constants::A4_RATIO;
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -73,13 +73,57 @@ mod tests {
 
     #[test]
     fn test_cli_parse_two_args_returns_some() {
-        use img2pdf::cli::parse_args;
+        use img2pdf::cli::{CliMode, parse_args};
         use img2pdf::utils::constants::DEFAULT_WIDTH;
         let args = vec!["/some/folder".to_string(), "/out.pdf".to_string()];
         let parsed = parse_args(&args).expect("Should parse with 2 args");
+        assert_eq!(parsed.mode, CliMode::Img2Pdf);
         assert_eq!(parsed.input_folder, "/some/folder");
         assert_eq!(parsed.output_path, "/out.pdf");
         assert_eq!(parsed.canvas_width, DEFAULT_WIDTH);
+    }
+
+    #[test]
+    fn test_cli_parse_pdf2img_subcommand() {
+        use img2pdf::cli::{CliMode, parse_args};
+        use img2pdf::pdf2img_processor::OutputImageFormat;
+        let args = vec![
+            "pdf2img".to_string(),
+            "/in.pdf".to_string(),
+            "/out".to_string(),
+            "--format".to_string(),
+            "png".to_string(),
+            "--width".to_string(),
+            "800".to_string(),
+        ];
+        let parsed = parse_args(&args).expect("Should parse pdf2img args");
+        assert_eq!(parsed.mode, CliMode::Pdf2Img);
+        assert_eq!(parsed.input_folder, "/in.pdf");
+        assert_eq!(parsed.output_path, "/out");
+        assert_eq!(parsed.canvas_width, 800);
+        assert_eq!(parsed.output_format, OutputImageFormat::Png);
+    }
+
+    #[test]
+    fn test_cli_parse_pdf2img_default_auto_lossless() {
+        use img2pdf::cli::parse_args;
+        use img2pdf::pdf2img_processor::OutputImageFormat;
+        let args = vec!["pdf2img".to_string(), "/in.pdf".to_string()];
+        let parsed = parse_args(&args).expect("Should parse pdf2img args");
+        assert_eq!(parsed.output_format, OutputImageFormat::AutoLossless);
+    }
+
+    #[test]
+    fn test_cli_parse_img2pdf_lossless() {
+        use img2pdf::cli::{CliMode, parse_args};
+        let args = vec![
+            "/folder".to_string(),
+            "/out.pdf".to_string(),
+            "--lossless".to_string(),
+        ];
+        let parsed = parse_args(&args).expect("Should parse with --lossless");
+        assert_eq!(parsed.mode, CliMode::Img2Pdf);
+        assert!(parsed.lossless);
     }
 
     #[test]

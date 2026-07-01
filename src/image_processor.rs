@@ -48,6 +48,7 @@ pub fn init_thread_pool() {
 pub struct JpegPage {
     pub width: u32,
     pub height: u32,
+    pub components: u8,
     pub data: Vec<u8>,
 }
 
@@ -148,11 +149,7 @@ impl ImageProcessor {
             });
             let output = child.wait_with_output();
             let write_ok = writer.join().map(|r| r.is_ok()).unwrap_or(false);
-            if write_ok {
-                output.ok()
-            } else {
-                None
-            }
+            if write_ok { output.ok() } else { None }
         });
 
         let output = match output {
@@ -198,10 +195,10 @@ impl ImageProcessor {
 
     /// zune-jpeg を使って JPEG をデコードする
     fn decode_image(file_path: &Path) -> Result<RgbImage, ProcessingError> {
+        use zune_jpeg::JpegDecoder;
         use zune_jpeg::zune_core::bytestream::ZCursor;
         use zune_jpeg::zune_core::colorspace::ColorSpace;
         use zune_jpeg::zune_core::options::DecoderOptions;
-        use zune_jpeg::JpegDecoder;
 
         let jpeg_bytes = std::fs::read(file_path).map_err(|e| ProcessingError {
             file_path: file_path.to_string_lossy().to_string(),
@@ -268,6 +265,44 @@ impl ImageProcessor {
         Ok(jpeg_bytes)
     }
 
+    /// JPEG を再圧縮せずに PDF 埋め込み用ページへ変換する。
+    ///
+    /// `--lossless` では画素リサイズも避けるため、キャンバス幅は表示倍率にのみ影響する。
+    fn process_jpeg_lossless(file_path: &Path) -> Result<JpegPage, ProcessingError> {
+        let (width, height, components) = Self::jpeg_dimensions(file_path)?;
+        let data = std::fs::read(file_path).map_err(|e| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("Failed to read JPEG for lossless embedding: {e}"),
+        })?;
+
+        Ok(JpegPage {
+            width,
+            height,
+            components,
+            data,
+        })
+    }
+
+    fn jpeg_dimensions(file_path: &Path) -> Result<(u32, u32, u8), ProcessingError> {
+        use zune_jpeg::JpegDecoder;
+        use zune_jpeg::zune_core::bytestream::ZCursor;
+
+        let jpeg_bytes = std::fs::read(file_path).map_err(|e| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("Failed to read file: {e}"),
+        })?;
+        let mut decoder = JpegDecoder::new(ZCursor::new(jpeg_bytes));
+        decoder.decode_headers().map_err(|e| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: format!("zune-jpeg header decode failed: {e:?}"),
+        })?;
+        let info = decoder.info().ok_or_else(|| ProcessingError {
+            file_path: file_path.to_string_lossy().to_string(),
+            message: "zune-jpeg: failed to get image info after decoding headers".to_string(),
+        })?;
+        Ok((info.width as u32, info.height as u32, info.components))
+    }
+
     /// 単一ファイルを読み込み → A4 キャンバスに配置 → JPEG エンコードまでを一括で行う
     ///
     /// `RgbImage` はエンコード後に即座にドロップし、メモリを解放する。
@@ -287,6 +322,7 @@ impl ImageProcessor {
         Ok(JpegPage {
             width: w,
             height: h,
+            components: 3,
             data: jpeg_data,
         })
     }
@@ -303,11 +339,13 @@ impl ImageProcessor {
         file_list: Vec<String>,
         canvas_width: u32,
         output_path: String,
+        lossless: bool,
         progress_tx: Option<mpsc::Sender<ProgressUpdate>>,
         finished_tx: mpsc::Sender<ProcessingResult>,
     ) {
         std::thread::spawn(move || {
-            let result = Self::run_thread(file_list, canvas_width, output_path, progress_tx);
+            let result =
+                Self::run_thread(file_list, canvas_width, output_path, lossless, progress_tx);
             let _ = finished_tx.send(result);
         });
     }
@@ -317,6 +355,7 @@ impl ImageProcessor {
         file_list: Vec<String>,
         canvas_width: u32,
         output_path: String,
+        lossless: bool,
         progress_tx: Option<mpsc::Sender<ProgressUpdate>>,
     ) -> ProcessingResult {
         let canvas_height = Self::calculate_height(canvas_width);
@@ -331,8 +370,12 @@ impl ImageProcessor {
             .par_iter()
             .enumerate()
             .map(|(idx, file_path)| {
-                let result =
-                    Self::process_and_encode(Path::new(file_path), canvas_width, canvas_height);
+                let path = Path::new(file_path);
+                let result = if lossless {
+                    Self::process_jpeg_lossless(path)
+                } else {
+                    Self::process_and_encode(path, canvas_width, canvas_height)
+                };
 
                 // ロックフリーで進捗カウンタをインクリメント
                 if let Some(ref tx) = progress_tx {
@@ -477,7 +520,11 @@ impl ImageProcessor {
             img.filter(Filter::DctDecode);
             img.width(page.width as i32);
             img.height(page.height as i32);
-            img.color_space().device_rgb();
+            match page.components {
+                1 => img.color_space().device_gray(),
+                4 => img.color_space().device_cmyk(),
+                _ => img.color_space().device_rgb(),
+            }
             img.bits_per_component(8);
             img.finish();
 
@@ -523,6 +570,7 @@ mod tests {
         JpegPage {
             width,
             height,
+            components: 3,
             data,
         }
     }
