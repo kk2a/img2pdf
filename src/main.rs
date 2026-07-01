@@ -3,8 +3,18 @@ use std::env;
 use std::time::Instant;
 
 fn main() {
-    // 引数を収集（プログラム名を除く）
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut raw_args = env::args();
+    let program_name = raw_args.next().unwrap_or_else(|| "img2pdf".to_string());
+    let mut args: Vec<String> = raw_args.collect();
+    let invoked_as_pdf2img = std::path::Path::new(&program_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("pdf2img"))
+        .unwrap_or(false);
+
+    if invoked_as_pdf2img && args.first().map(|a| a.as_str()) != Some("pdf2img") {
+        args.insert(0, "pdf2img".to_string());
+    }
 
     if let Some(cli_args) = cli::parse_args(&args) {
         image_processor::ImageProcessor::set_max_performance_mode(cli_args.max_performance);
@@ -19,7 +29,7 @@ fn main() {
 
         if result.success {
             eprintln!(
-                "完了: {} 枚を \"{}\" に保存しました（エラー: {} 枚）",
+                "完了: {} 件を \"{}\" に保存しました（エラー: {} 件）",
                 result.success_count, result.output_path, result.error_count
             );
             eprintln!("実行時間: {:.3} 秒", elapsed_secs);

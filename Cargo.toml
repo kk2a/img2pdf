@@ -7,6 +7,10 @@ edition = "2024"
 name = "img2pdf"
 path = "src/main.rs"
 
+[[bin]]
+name = "pdf2img"
+path = "src/main.rs"
+
 [dependencies]
 # 画像処理
 image = "0.24"
