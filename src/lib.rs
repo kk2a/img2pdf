@@ -4,4 +4,5 @@ pub mod gui;
 pub mod image_processor;
 pub mod models;
 pub mod pdf2img_processor;
+pub mod pdf_tools;
 pub mod utils;
