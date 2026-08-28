@@ -19,7 +19,7 @@
 //! ```
 
 use crate::app_config::AppConfig;
-use crate::image_processor::{init_thread_pool, ImageProcessor};
+use crate::image_processor::{ImageProcessor, init_thread_pool};
 use crate::models::{ProcessingResult, ProgressPhase, ProgressUpdate};
 use crate::utils::constants::*;
 use fltk::{
@@ -110,6 +110,13 @@ pub fn run() {
         .with_size(140, 28)
         .with_pos(170, 25)
         .with_label("ファイルを追加");
+
+    let mut btn_book_scan = Button::default()
+        .with_size(170, 28)
+        .with_pos(400, 25)
+        .with_label("本モードを開く...");
+    btn_book_scan.set_color(Color::from_rgb(72, 125, 90));
+    btn_book_scan.set_label_color(Color::White);
 
     let mut lbl_file_count = Frame::default()
         .with_size(220, 25)
@@ -208,6 +215,10 @@ pub fn run() {
 
     wind.end();
     wind.show();
+
+    btn_book_scan.set_callback(move |_| {
+        super::book_scan_dialog::show();
+    });
 
     // ── コールバック: フォルダを選択 ─────────────────────────────────────
     {

@@ -1,4 +1,5 @@
 pub mod app_config;
+pub mod book_scan;
 pub mod cli;
 pub mod gui;
 pub mod image_processor;

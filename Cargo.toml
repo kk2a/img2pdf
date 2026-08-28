@@ -24,6 +24,10 @@ zune-jpeg = "0.5"
 # PDF生成
 pdf-writer = "0.11"
 
+# 本モード: ScanTailor project XML / JPEG 4:4:4
+quick-xml = "0.42"
+jpeg-encoder = "0.7"
+
 # GUI
 fltk = { version = "1.4", features = ["fltk-bundled"] }
 

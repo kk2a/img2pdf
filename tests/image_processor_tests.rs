@@ -139,6 +139,135 @@ mod tests {
         assert_eq!(parsed.canvas_width, 800);
     }
 
+    #[test]
+    fn test_cli_parse_book_scan_runtime_options() {
+        use img2pdf::book_scan::{JpegSampling, SuperResolutionMode};
+        use img2pdf::cli::{CliMode, parse_args};
+
+        let args = vec![
+            "book-scan".to_string(),
+            "/in.pdf".to_string(),
+            "/out.pdf".to_string(),
+            "--normalize".to_string(),
+            "off".to_string(),
+            "--blank-dark-delta".to_string(),
+            "30".to_string(),
+            "--blank-max-edge-ratio".to_string(),
+            "0.001".to_string(),
+            "--crop-exclude-pages".to_string(),
+            "1,158".to_string(),
+            "--color-normalize".to_string(),
+            "off".to_string(),
+            "--ink-neutralize".to_string(),
+            "on".to_string(),
+            "--ink-neutralize-strength".to_string(),
+            "80".to_string(),
+            "--ink-neutralize-exclude-pages".to_string(),
+            "1,22-23".to_string(),
+            "--pre-stroke".to_string(),
+            "on".to_string(),
+            "--pre-stroke-strength".to_string(),
+            "7".to_string(),
+            "--superres".to_string(),
+            "lanczos".to_string(),
+            "--output-scale".to_string(),
+            "3".to_string(),
+            "--ai-scale".to_string(),
+            "4".to_string(),
+            "--gpu-workers".to_string(),
+            "2".to_string(),
+            "--stroke-strength".to_string(),
+            "22".to_string(),
+            "--jpeg-quality".to_string(),
+            "94".to_string(),
+            "--jpeg-sampling".to_string(),
+            "420".to_string(),
+            "--preserve-position".to_string(),
+            "off".to_string(),
+        ];
+        let parsed = parse_args(&args).expect("Should parse book-scan args");
+        assert_eq!(parsed.mode, CliMode::BookScan);
+        assert!(parsed.parse_error.is_none());
+        let config = parsed.book_scan.unwrap();
+        assert!(!config.normalize_illumination);
+        assert_eq!(config.blank_dark_delta, 30);
+        assert_eq!(config.blank_max_edge_ratio, 0.001);
+        assert_eq!(config.crop_exclude_pages.len(), 2);
+        assert!(!config.color_normalization_enabled);
+        assert!(config.ink_neutralization_enabled);
+        assert_eq!(config.ink_neutralization_strength, 80);
+        assert_eq!(config.ink_neutralization_exclude_pages.len(), 2);
+        assert!(config.pre_stroke_enabled);
+        assert_eq!(config.pre_stroke_strength, 7);
+        assert_eq!(config.super_resolution, SuperResolutionMode::Lanczos);
+        assert_eq!(config.superres_output_scale, 3);
+        assert_eq!(config.superres_ai_scale, 4);
+        assert_eq!(config.gpu_workers, 2);
+        assert_eq!(config.stroke_strength, 22);
+        assert_eq!(config.jpeg_quality, 94);
+        assert_eq!(config.jpeg_sampling, JpegSampling::S420);
+        assert!(!config.preserve_position);
+    }
+
+    #[test]
+    fn test_cli_book_scan_rejects_bad_runtime_value() {
+        use img2pdf::cli::parse_args;
+        let args = vec![
+            "book-scan".to_string(),
+            "/in.pdf".to_string(),
+            "--gpu-workers".to_string(),
+            "many".to_string(),
+        ];
+        let parsed = parse_args(&args).unwrap();
+        assert!(parsed.parse_error.unwrap().contains("--gpu-workers"));
+    }
+
+    #[test]
+    fn test_cli_book_scan_accepts_legacy_scale_aliases() {
+        use img2pdf::cli::parse_args;
+        let args = vec![
+            "book-scan".to_string(),
+            "/in.pdf".to_string(),
+            "--scale".to_string(),
+            "2".to_string(),
+            "--inference-scale".to_string(),
+            "4".to_string(),
+        ];
+        let config = parse_args(&args).unwrap().book_scan.unwrap();
+        assert_eq!(config.superres_output_scale, 2);
+        assert_eq!(config.superres_ai_scale, 4);
+    }
+
+    #[test]
+    fn test_cli_no_scantailor_disables_dependent_features() {
+        use img2pdf::cli::parse_args;
+        let args = vec![
+            "book-scan".to_string(),
+            "/in.pdf".to_string(),
+            "--no-scantailor".to_string(),
+        ];
+        let config = parse_args(&args).unwrap().book_scan.unwrap();
+        assert!(!config.scantailor_enabled);
+        assert!(!config.crop_enabled);
+        assert!(!config.normalize_illumination);
+        assert!(!config.deskew_enabled);
+        assert!(!config.dewarp_enabled);
+    }
+
+    #[test]
+    fn test_cli_book_scan_rejects_unknown_and_missing_options() {
+        use img2pdf::cli::parse_args;
+        let args = vec![
+            "book-scan".to_string(),
+            "/in.pdf".to_string(),
+            "--gpu-workers".to_string(),
+            "--unknown-setting".to_string(),
+        ];
+        let error = parse_args(&args).unwrap().parse_error.unwrap();
+        assert!(error.contains("--gpu-workers に値がありません"));
+        assert!(error.contains("不明なオプションです: --unknown-setting"));
+    }
+
     // ─── jpegtran 最小疎通 ─────────────────────────────────────────────
     // jpegtran バイナリが配置されていない場合はスキップする。
 
