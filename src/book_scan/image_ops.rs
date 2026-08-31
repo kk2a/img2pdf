@@ -1,6 +1,7 @@
 use super::config::{BookScanConfig, JpegSampling};
 use super::manifest::{BookScanStage, PageRecord};
 use super::progress::{ProgressCallback, ProgressCounter};
+use super::tone::{self, PageTone, ToneProfile};
 use image::{DynamicImage, RgbImage};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use rayon::prelude::*;
@@ -215,6 +216,13 @@ pub fn encode_pages(
         .num_threads(config.cpu_workers)
         .build()
         .map_err(|e| format!("CPU worker poolを作成できません: {e}"))?;
+    let blank = pages.iter().map(|page| page.is_blank).collect::<Vec<_>>();
+    let page_numbers = pages
+        .iter()
+        .map(|page| page.page_number)
+        .collect::<Vec<_>>();
+    let tone_plan =
+        pool.install(|| tone::analyze_pages(config, &inputs, &blank, &page_numbers, progress))?;
     let counter = ProgressCounter::new("JPEG化", inputs.len(), progress);
     let results = pool.install(|| {
         inputs
@@ -224,10 +232,11 @@ pub fn encode_pages(
                 encode_page(
                     input,
                     &output,
+                    config,
+                    tone_plan.pages[*index],
+                    tone_plan.profile,
                     (!pages[*index].is_blank && config.stroke_enabled)
                         .then_some(config.stroke_strength),
-                    config.jpeg_quality,
-                    config.jpeg_sampling,
                 )?;
                 counter.advance();
                 Ok::<_, String>((*index, output))
@@ -264,18 +273,28 @@ pub fn encode_pages(
 fn encode_page(
     input: &Path,
     output: &Path,
+    config: &BookScanConfig,
+    page_tone: PageTone,
+    tone_profile: Option<ToneProfile>,
     stroke_strength: Option<u8>,
-    quality: u8,
-    sampling: JpegSampling,
 ) -> Result<(), String> {
-    let image = image::open(input)
+    let mut image = image::open(input)
         .map_err(|e| format!("{}を開けません: {e}", input.display()))?
         .to_rgb8();
-    let image = match stroke_strength.filter(|strength| *strength > 0) {
-        Some(strength) => minimum_blend(&image, strength),
-        None => image,
-    };
-    encode_jpeg(&image, output, quality, sampling)
+    if config.tone_boost_enabled
+        && page_tone.monochrome
+        && !page_tone.excluded
+        && let Some(profile) = tone_profile
+    {
+        image = tone::apply_boost(&image, profile, config.tone_boost_strength);
+    }
+    if let Some(strength) = stroke_strength.filter(|strength| *strength > 0) {
+        image = minimum_blend(&image, strength);
+    }
+    if tone::should_apply_gray(config.partial_grayscale, page_tone) {
+        image = tone::partial_grayscale(&image, config.partial_grayscale_strength);
+    }
+    encode_jpeg(&image, output, config.jpeg_quality, config.jpeg_sampling)
 }
 
 pub fn minimum_blend(source: &RgbImage, strength: u8) -> RgbImage {

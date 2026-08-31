@@ -1,7 +1,7 @@
 use crate::app_config::AppConfig;
 use crate::book_scan::{
     BookScanConfig, BookScanProcessor, BookScanProgress, BookScanReport, JpegSampling, PageRange,
-    SuperResolutionMode,
+    PartialGrayscaleMode, SuperResolutionMode,
 };
 use fltk::{
     app,
@@ -150,7 +150,7 @@ pub fn show() {
     let mut ai_scale = IntInput::new(485, 523, 70, 26, None);
     ai_scale.set_value(&saved.superres_ai_scale.to_string());
 
-    section(10, 595, 820, 145, "文字・JPEG・再開");
+    section(10, 595, 820, 255, "文字・階調・JPEG・再開");
     let stroke_enabled = check(25, 620, "文字太さ調整", saved.stroke_enabled);
     label(195, 620, 80, "強さ:");
     let mut stroke_strength = IntInput::new(275, 620, 75, 26, None);
@@ -166,34 +166,60 @@ pub fn show() {
         JpegSampling::S422 => 1,
         JpegSampling::S420 => 2,
     });
-    let resume = check(25, 660, "中断再開", saved.resume);
-    let keep_work = check(180, 660, "中間画像を保持", saved.keep_work);
-    let preserve_position = check(25, 697, "元位置・サイズを保持", saved.preserve_position);
-    label(370, 660, 100, "作業folder:");
-    let mut work_dir = Input::new(470, 660, 315, 26, None);
+    let tone_boost = check(25, 657, "tone boost", saved.tone_boost_enabled);
+    label(195, 657, 80, "強さ:");
+    let mut tone_boost_strength = IntInput::new(275, 657, 75, 26, None);
+    tone_boost_strength.set_value(&saved.tone_boost_strength.to_string());
+    label(380, 657, 160, "部分グレースケール:");
+    let mut partial_grayscale = Choice::new(540, 657, 125, 26, None);
+    partial_grayscale.add_choice("off|auto|force");
+    partial_grayscale.set_value(match saved.partial_grayscale {
+        PartialGrayscaleMode::Off => 0,
+        PartialGrayscaleMode::Auto => 1,
+        PartialGrayscaleMode::Force => 2,
+    });
+    label(680, 657, 55, "強さ:");
+    let mut partial_grayscale_strength = IntInput::new(735, 657, 50, 26, None);
+    partial_grayscale_strength.set_value(&saved.partial_grayscale_strength.to_string());
+
+    label(25, 694, 145, "全体カラー閾値:");
+    let mut tone_global_threshold = FloatInput::new(170, 694, 80, 26, None);
+    tone_global_threshold.set_value(&saved.tone_color_global_threshold.to_string());
+    label(275, 694, 145, "局所カラー閾値:");
+    let mut tone_tile_threshold = FloatInput::new(420, 694, 80, 26, None);
+    tone_tile_threshold.set_value(&saved.tone_color_tile_threshold.to_string());
+    label(525, 694, 110, "補正除外:");
+    let mut tone_exclude_pages = Input::new(635, 694, 150, 26, None);
+    tone_exclude_pages.set_value(&PageRange::format_list(&saved.tone_exclude_pages));
+
+    let resume = check(25, 735, "中断再開", saved.resume);
+    let keep_work = check(180, 735, "中間画像を保持", saved.keep_work);
+    let preserve_position = check(335, 735, "元位置・サイズを保持", saved.preserve_position);
+    label(25, 775, 100, "作業folder:");
+    let mut work_dir = Input::new(125, 775, 660, 26, None);
     if let Some(path) = &saved.work_dir {
         work_dir.set_value(&path.to_string_lossy());
     }
 
-    section(10, 750, 820, 130, "空白ページ判定");
-    let blank_detection = check(25, 775, "空白判定", saved.blank_detection_enabled);
-    label(180, 775, 95, "dark差:");
-    let mut blank_dark_delta = IntInput::new(275, 775, 70, 26, None);
+    section(10, 860, 820, 130, "空白ページ判定");
+    let blank_detection = check(25, 885, "空白判定", saved.blank_detection_enabled);
+    label(180, 885, 95, "dark差:");
+    let mut blank_dark_delta = IntInput::new(275, 885, 70, 26, None);
     blank_dark_delta.set_value(&saved.blank_dark_delta.to_string());
-    label(370, 775, 115, "最大dark比:");
-    let mut blank_max_dark = FloatInput::new(485, 775, 100, 26, None);
+    label(370, 885, 115, "最大dark比:");
+    let mut blank_max_dark = FloatInput::new(485, 885, 100, 26, None);
     blank_max_dark.set_value(&saved.blank_max_dark_ratio.to_string());
-    label(25, 812, 145, "edge輝度差:");
-    let mut blank_edge_threshold = IntInput::new(170, 812, 70, 26, None);
+    label(25, 922, 145, "edge輝度差:");
+    let mut blank_edge_threshold = IntInput::new(170, 922, 70, 26, None);
     blank_edge_threshold.set_value(&saved.blank_edge_threshold.to_string());
-    label(275, 812, 145, "最大edge比:");
-    let mut blank_max_edge = FloatInput::new(420, 812, 100, 26, None);
+    label(275, 922, 145, "最大edge比:");
+    let mut blank_max_edge = FloatInput::new(420, 922, 100, 26, None);
     blank_max_edge.set_value(&saved.blank_max_edge_ratio.to_string());
 
-    let mut run_button = Button::new(285, 900, 290, 38, "本モードを実行");
+    let mut run_button = Button::new(285, 1010, 290, 38, "本モードを実行");
     run_button.set_color(Color::from_rgb(72, 125, 90));
     run_button.set_label_color(Color::White);
-    let mut status = Frame::new(25, 950, 775, 32, "待機中");
+    let mut status = Frame::new(25, 1060, 775, 32, "待機中");
     status.set_align(Align::Center | Align::Inside);
     status.set_frame(FrameType::DownBox);
 
@@ -358,6 +384,24 @@ pub fn show() {
                 tta_enabled: tta.value(),
                 stroke_enabled: stroke_enabled.value(),
                 stroke_strength: parse(&stroke_strength.value(), "文字太さ")?,
+                tone_boost_enabled: tone_boost.value(),
+                tone_boost_strength: parse(&tone_boost_strength.value(), "tone boostの強さ")?,
+                partial_grayscale: match partial_grayscale.value() {
+                    0 => PartialGrayscaleMode::Off,
+                    2 => PartialGrayscaleMode::Force,
+                    _ => PartialGrayscaleMode::Auto,
+                },
+                partial_grayscale_strength: parse(
+                    &partial_grayscale_strength.value(),
+                    "部分グレースケールの強さ",
+                )?,
+                tone_color_global_threshold: parse(
+                    &tone_global_threshold.value(),
+                    "全体カラー閾値",
+                )?,
+                tone_color_tile_threshold: parse(&tone_tile_threshold.value(), "局所カラー閾値")?,
+                tone_exclude_pages: PageRange::parse_list(&tone_exclude_pages.value())
+                    .ok_or("tone補正の除外ページが不正です")?,
                 pre_stroke_enabled: pre_stroke.value(),
                 pre_stroke_strength: parse(&pre_stroke_strength.value(), "超解像前の線補強")?,
                 jpeg_quality: parse(&jpeg_quality.value(), "JPEG品質")?,

@@ -135,9 +135,15 @@ impl BookScanProcessor {
             progress_stage(&progress, 4, "JPEGを再利用します");
             eprintln!("本モード [4/5]: 検証済みJPEGを再利用します");
         } else {
-            progress_stage(&progress, 4, "文字太さ調整とJPEG化を実行します");
+            progress_stage(&progress, 4, "階調・文字色・太さ調整とJPEG化を実行します");
             eprintln!(
-                "本モード [4/5]: 文字太さ {} / JPEG quality {}を実行します",
+                "本モード [4/5]: tone boost {} / 部分gray {:?} / 文字太さ {} / JPEG quality {}を実行します",
+                if config.tone_boost_enabled {
+                    config.tone_boost_strength.to_string()
+                } else {
+                    "OFF".to_string()
+                },
+                config.partial_grayscale,
                 if config.stroke_enabled {
                     config.stroke_strength.to_string()
                 } else {

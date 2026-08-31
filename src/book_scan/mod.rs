@@ -10,9 +10,12 @@ mod progress;
 mod scantailor;
 mod scheduler;
 mod superres;
+mod tone;
 mod tools;
 
-pub use config::{BookScanConfig, JpegSampling, PageRange, SuperResolutionMode};
+pub use config::{
+    BookScanConfig, JpegSampling, PageRange, PartialGrayscaleMode, SuperResolutionMode,
+};
 pub use manifest::{BlankPageMetrics, BookScanManifest, BookScanStage, PageRecord};
 pub use pdf::{A4_HEIGHT_PT, A4_WIDTH_PT, Placement, calculate_placement};
 pub use pipeline::{BookScanProcessor, BookScanProgress, BookScanReport};

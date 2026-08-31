@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_book_scan_runtime_options() {
-        use img2pdf::book_scan::{JpegSampling, SuperResolutionMode};
+        use img2pdf::book_scan::{JpegSampling, PartialGrayscaleMode, SuperResolutionMode};
         use img2pdf::cli::{CliMode, parse_args};
 
         let args = vec![
@@ -178,6 +178,18 @@ mod tests {
             "2".to_string(),
             "--stroke-strength".to_string(),
             "22".to_string(),
+            "--tone-boost-strength".to_string(),
+            "85".to_string(),
+            "--partial-grayscale".to_string(),
+            "force".to_string(),
+            "--partial-grayscale-strength".to_string(),
+            "70".to_string(),
+            "--tone-color-global-threshold".to_string(),
+            "0.02".to_string(),
+            "--tone-color-tile-threshold".to_string(),
+            "0.4".to_string(),
+            "--tone-exclude-pages".to_string(),
+            "1,10-12".to_string(),
             "--jpeg-quality".to_string(),
             "94".to_string(),
             "--jpeg-sampling".to_string(),
@@ -204,6 +216,12 @@ mod tests {
         assert_eq!(config.superres_ai_scale, 4);
         assert_eq!(config.gpu_workers, 2);
         assert_eq!(config.stroke_strength, 22);
+        assert_eq!(config.tone_boost_strength, 85);
+        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Force);
+        assert_eq!(config.partial_grayscale_strength, 70);
+        assert_eq!(config.tone_color_global_threshold, 0.02);
+        assert_eq!(config.tone_color_tile_threshold, 0.4);
+        assert_eq!(config.tone_exclude_pages.len(), 2);
         assert_eq!(config.jpeg_quality, 94);
         assert_eq!(config.jpeg_sampling, JpegSampling::S420);
         assert!(!config.preserve_position);

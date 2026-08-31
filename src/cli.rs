@@ -12,7 +12,8 @@
 //! ```
 
 use crate::book_scan::{
-    BookScanConfig, BookScanProcessor, JpegSampling, PageRange, SuperResolutionMode,
+    BookScanConfig, BookScanProcessor, JpegSampling, PageRange, PartialGrayscaleMode,
+    SuperResolutionMode,
 };
 use crate::image_processor::ImageProcessor;
 use crate::models::{ProcessingError, ProcessingResult, ProgressPhase, ProgressUpdate};
@@ -182,6 +183,7 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
     toggle!("--dewarp", dewarp_enabled);
     toggle!("--tta", tta_enabled);
     toggle!("--stroke", stroke_enabled);
+    toggle!("--tone-boost", tone_boost_enabled);
     toggle!("--pre-stroke", pre_stroke_enabled);
     toggle!("--preserve-position", preserve_position);
     toggle!("--resume", resume);
@@ -212,6 +214,22 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
     number!("--tile", tile_size, u32);
     number!("--gpu-id", gpu_id, i32);
     number!("--stroke-strength", stroke_strength, u8);
+    number!("--tone-boost-strength", tone_boost_strength, u8);
+    number!(
+        "--partial-grayscale-strength",
+        partial_grayscale_strength,
+        u8
+    );
+    number!(
+        "--tone-color-global-threshold",
+        tone_color_global_threshold,
+        f32
+    );
+    number!(
+        "--tone-color-tile-threshold",
+        tone_color_tile_threshold,
+        f32
+    );
     number!("--pre-stroke-strength", pre_stroke_strength, u8);
     number!("--jpeg-quality", jpeg_quality, u8);
 
@@ -232,6 +250,20 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
             Some(value) => config.ink_neutralization_exclude_pages = value,
             None => errors.push(format!(
                 "--ink-neutralize-exclude-pages の値が不正です: {value}"
+            )),
+        }
+    }
+    if let Some(value) = option_value(args, "--tone-exclude-pages") {
+        match PageRange::parse_list(value) {
+            Some(value) => config.tone_exclude_pages = value,
+            None => errors.push(format!("--tone-exclude-pages の値が不正です: {value}")),
+        }
+    }
+    if let Some(value) = option_value(args, "--partial-grayscale") {
+        match PartialGrayscaleMode::parse(value) {
+            Some(value) => config.partial_grayscale = value,
+            None => errors.push(format!(
+                "--partial-grayscale にはoff/auto/forceを指定してください: {value}"
             )),
         }
     }
@@ -284,6 +316,9 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
     }
     if args.iter().any(|arg| arg == "--no-stroke") {
         config.stroke_enabled = false;
+    }
+    if args.iter().any(|arg| arg == "--no-tone-boost") {
+        config.tone_boost_enabled = false;
     }
     if args.iter().any(|arg| arg == "--no-resume") {
         config.resume = false;
@@ -372,6 +407,13 @@ fn validate_book_option_names(args: &[String], errors: &mut Vec<String>) {
         "--model-dir",
         "--stroke",
         "--stroke-strength",
+        "--tone-boost",
+        "--tone-boost-strength",
+        "--partial-grayscale",
+        "--partial-grayscale-strength",
+        "--tone-color-global-threshold",
+        "--tone-color-tile-threshold",
+        "--tone-exclude-pages",
         "--pre-stroke",
         "--pre-stroke-strength",
         "--jpeg-quality",
@@ -387,6 +429,7 @@ fn validate_book_option_names(args: &[String], errors: &mut Vec<String>) {
         "--no-color-normalize",
         "--no-ink-neutralize",
         "--no-stroke",
+        "--no-tone-boost",
         "--no-resume",
         "--max-performance",
         "--no-max-performance",
@@ -450,7 +493,8 @@ pub fn print_book_scan_usage() {
 既定プリセット:
   ScanTailor ON / crop ON / 背景正規化 ON / deskew OFF / dewarp OFF
   カラー紙面補正 ON / 黒インク色差補正 OFF
-  animevideov3でAI内部x2、最終画像x1 / GPU worker 4 / Minimum 15
+  animevideov3でAI内部x2、最終画像x1 / GPU worker 4 / tone boost / Minimum 15
+  白黒本文は暗部のみ自動グレースケール化、カラー頁と表紙は自動・手動保護
   JPEG Q90 4:4:4 / A4上の元位置・サイズを保持
   表紙（1ページ目）はcrop除外 / 空白ページの重い処理を省略して元画像を埋め込み
 
@@ -504,15 +548,22 @@ ScanTailor前処理:
   --pre-stroke-strength <0..100> 超解像前Minimum blend率 [5]
 
 文字・JPEG:
+  --tone-boost <on|off>          本全体の紙・インク基準で階調補正 [on]
+  --tone-boost-strength <0..100> 階調補正の強さ [100]
   --stroke <on|off>              文字太さ調整 [on]
   --stroke-strength <0..100>     Minimum blend率 [15]
+  --partial-grayscale <off|auto|force> 暗い文字だけ無彩色化 [auto]
+  --partial-grayscale-strength <0..100> 無彩色化の強さ [100]
+  --tone-color-global-threshold <0..1> カラー頁の全体色面積閾値 [0.01]
+  --tone-color-tile-threshold <0..1> カラー頁の局所色面積閾値 [0.30]
+  --tone-exclude-pages <LIST>    tone/grayを適用しないページ [1]
   --jpeg-quality <1..100>        JPEG品質 [90]
   --jpeg-sampling <444|422|420>  chroma sampling [444]
   --preserve-position <on|off>   A4上の元位置・サイズ保持 [on]
 
 短縮flag:
   --no-scantailor --no-blank-detection --no-crop --no-normalize
-  --no-color-normalize --no-ink-neutralize --no-stroke --no-resume
+  --no-color-normalize --no-ink-neutralize --no-tone-boost --no-stroke --no-resume
 
 環境変数:
   IMG2PDF_SCANTAILOR / IMG2PDF_REALESRGAN

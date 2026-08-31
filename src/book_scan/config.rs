@@ -28,6 +28,25 @@ pub enum JpegSampling {
     S420,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartialGrayscaleMode {
+    Off,
+    Auto,
+    Force,
+}
+
+impl PartialGrayscaleMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "off" | "none" | "0" => Some(Self::Off),
+            "auto" | "automatic" => Some(Self::Auto),
+            "force" | "on" | "1" => Some(Self::Force),
+            _ => None,
+        }
+    }
+}
+
 impl JpegSampling {
     pub fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().replace(':', "").as_str() {
@@ -160,6 +179,22 @@ pub struct BookScanConfig {
 
     pub stroke_enabled: bool,
     pub stroke_strength: u8,
+    /// 本全体から推定した黒点・白点で文字と紙面のコントラストを整える。
+    #[serde(default = "default_true")]
+    pub tone_boost_enabled: bool,
+    #[serde(default = "default_tone_strength")]
+    pub tone_boost_strength: u8,
+    /// 暗い文字領域だけを無彩色化する。Autoはカラー頁を除外する。
+    #[serde(default = "default_partial_grayscale")]
+    pub partial_grayscale: PartialGrayscaleMode,
+    #[serde(default = "default_tone_strength")]
+    pub partial_grayscale_strength: u8,
+    #[serde(default = "default_tone_color_global_threshold")]
+    pub tone_color_global_threshold: f32,
+    #[serde(default = "default_tone_color_tile_threshold")]
+    pub tone_color_tile_threshold: f32,
+    #[serde(default = "default_tone_exclude_pages")]
+    pub tone_exclude_pages: Vec<PageRange>,
     #[serde(default)]
     pub pre_stroke_enabled: bool,
     #[serde(default = "default_pre_stroke_strength")]
@@ -219,6 +254,13 @@ impl Default for BookScanConfig {
             tta_enabled: false,
             stroke_enabled: true,
             stroke_strength: 15,
+            tone_boost_enabled: true,
+            tone_boost_strength: default_tone_strength(),
+            partial_grayscale: default_partial_grayscale(),
+            partial_grayscale_strength: default_tone_strength(),
+            tone_color_global_threshold: default_tone_color_global_threshold(),
+            tone_color_tile_threshold: default_tone_color_tile_threshold(),
+            tone_exclude_pages: default_tone_exclude_pages(),
             pre_stroke_enabled: false,
             pre_stroke_strength: default_pre_stroke_strength(),
             jpeg_quality: 90,
@@ -271,6 +313,26 @@ fn default_ink_neutralization_exclude_pages() -> Vec<PageRange> {
 
 fn default_pre_stroke_strength() -> u8 {
     5
+}
+
+fn default_tone_strength() -> u8 {
+    100
+}
+
+fn default_partial_grayscale() -> PartialGrayscaleMode {
+    PartialGrayscaleMode::Auto
+}
+
+fn default_tone_color_global_threshold() -> f32 {
+    0.01
+}
+
+fn default_tone_color_tile_threshold() -> f32 {
+    0.30
+}
+
+fn default_tone_exclude_pages() -> Vec<PageRange> {
+    vec![PageRange { start: 1, end: 1 }]
 }
 
 fn default_superres_output_scale() -> u32 {
@@ -342,11 +404,15 @@ impl BookScanConfig {
         if self.pre_stroke_strength > 100
             || self.color_normalization_strength > 100
             || self.ink_neutralization_strength > 100
+            || self.tone_boost_strength > 100
+            || self.partial_grayscale_strength > 100
         {
-            return Err(
-                "前処理の文字補強・カラー紙面補正・黒インク補正の強さには0–100を指定してください"
-                    .to_string(),
-            );
+            return Err("各種画像補正の強さには0–100を指定してください".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.tone_color_global_threshold)
+            || !(0.0..=1.0).contains(&self.tone_color_tile_threshold)
+        {
+            return Err("カラー頁判定の比率には0.0–1.0を指定してください".to_string());
         }
         if self.color_normalization_radius == 0 || self.color_normalization_radius > 256 {
             return Err("カラー紙面補正の半径には1–256を指定してください".to_string());
@@ -392,6 +458,12 @@ impl BookScanConfig {
 
     pub fn ink_neutralization_excluded(&self, page_number: usize) -> bool {
         self.ink_neutralization_exclude_pages
+            .iter()
+            .any(|range| (range.start..=range.end).contains(&page_number))
+    }
+
+    pub fn tone_excluded(&self, page_number: usize) -> bool {
+        self.tone_exclude_pages
             .iter()
             .any(|range| (range.start..=range.end).contains(&page_number))
     }
@@ -447,6 +519,10 @@ mod tests {
             Some(SuperResolutionMode::Off)
         );
         assert_eq!(JpegSampling::parse("4:4:4"), Some(JpegSampling::S444));
+        assert_eq!(
+            PartialGrayscaleMode::parse("auto"),
+            Some(PartialGrayscaleMode::Auto)
+        );
     }
 
     #[test]
@@ -454,6 +530,8 @@ mod tests {
         let config = BookScanConfig::default();
         assert_eq!(config.resolved_ai_scale(), 2);
         assert_eq!(config.effective_output_scale(), 1);
+        assert!(config.tone_boost_enabled);
+        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Auto);
     }
 
     #[test]
@@ -478,5 +556,30 @@ mod tests {
         let config: BookScanConfig = serde_json::from_value(value).unwrap();
         assert_eq!(config.superres_output_scale, 2);
         assert_eq!(config.superres_ai_scale, 4);
+    }
+
+    #[test]
+    fn old_saved_config_gets_safe_tone_defaults() {
+        let mut value = serde_json::to_value(BookScanConfig::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for field in [
+            "tone_boost_enabled",
+            "tone_boost_strength",
+            "partial_grayscale",
+            "partial_grayscale_strength",
+            "tone_color_global_threshold",
+            "tone_color_tile_threshold",
+            "tone_exclude_pages",
+        ] {
+            object.remove(field);
+        }
+        let config: BookScanConfig = serde_json::from_value(value).unwrap();
+        assert!(config.tone_boost_enabled);
+        assert_eq!(config.tone_boost_strength, 100);
+        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Auto);
+        assert_eq!(
+            config.tone_exclude_pages,
+            vec![PageRange { start: 1, end: 1 }]
+        );
     }
 }

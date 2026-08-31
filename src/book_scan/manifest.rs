@@ -59,7 +59,9 @@ pub struct BookScanManifest {
 }
 
 impl BookScanManifest {
-    pub const SCHEMA_VERSION: u32 = 3;
+    // v4から最終JPEG化にtone boostと部分グレースケールが加わった。
+    // v3以前のJPEGを新しい既定値で処理済みと誤認して再利用しない。
+    pub const SCHEMA_VERSION: u32 = 4;
 
     pub fn new(config: BookScanConfig, pages: Vec<PageRecord>) -> Self {
         Self {
