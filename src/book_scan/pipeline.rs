@@ -151,6 +151,12 @@ impl BookScanProcessor {
                 },
                 config.jpeg_quality
             );
+            if !config.grayscale_pages.is_empty() {
+                eprintln!(
+                    "本モード [4/5]: 指定ページ [{}] を全体grayの1成分JPEGにします",
+                    PageRange::format_list(&config.grayscale_pages)
+                );
+            }
             let report_encoding = |phase: &str, completed: usize, total: usize| {
                 progress_units(&progress, 4, phase, completed, total);
             };

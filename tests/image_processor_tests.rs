@@ -190,6 +190,8 @@ mod tests {
             "0.4".to_string(),
             "--tone-exclude-pages".to_string(),
             "1,10-12".to_string(),
+            "--grayscale-pages".to_string(),
+            "30,40-42".to_string(),
             "--jpeg-quality".to_string(),
             "94".to_string(),
             "--jpeg-sampling".to_string(),
@@ -222,6 +224,7 @@ mod tests {
         assert_eq!(config.tone_color_global_threshold, 0.02);
         assert_eq!(config.tone_color_tile_threshold, 0.4);
         assert_eq!(config.tone_exclude_pages.len(), 2);
+        assert_eq!(config.grayscale_pages.len(), 2);
         assert_eq!(config.jpeg_quality, 94);
         assert_eq!(config.jpeg_sampling, JpegSampling::S420);
         assert!(!config.preserve_position);

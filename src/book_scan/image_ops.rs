@@ -235,6 +235,7 @@ pub fn encode_pages(
                     config,
                     tone_plan.pages[*index],
                     tone_plan.profile,
+                    config.grayscale_page(pages[*index].page_number),
                     (!pages[*index].is_blank && config.stroke_enabled)
                         .then_some(config.stroke_strength),
                 )?;
@@ -276,6 +277,7 @@ fn encode_page(
     config: &BookScanConfig,
     page_tone: PageTone,
     tone_profile: Option<ToneProfile>,
+    grayscale: bool,
     stroke_strength: Option<u8>,
 ) -> Result<(), String> {
     let mut image = image::open(input)
@@ -294,7 +296,13 @@ fn encode_page(
     if tone::should_apply_gray(config.partial_grayscale, page_tone) {
         image = tone::partial_grayscale(&image, config.partial_grayscale_strength);
     }
-    encode_jpeg(&image, output, config.jpeg_quality, config.jpeg_sampling)
+    encode_jpeg(
+        &image,
+        output,
+        config.jpeg_quality,
+        config.jpeg_sampling,
+        grayscale,
+    )
 }
 
 pub fn minimum_blend(source: &RgbImage, strength: u8) -> RgbImage {
@@ -354,6 +362,7 @@ fn encode_jpeg(
     output: &Path,
     quality: u8,
     sampling: JpegSampling,
+    grayscale: bool,
 ) -> Result<(), String> {
     let width = u16::try_from(image.width()).map_err(|_| "JPEGの幅が65535を超えています")?;
     let height = u16::try_from(image.height()).map_err(|_| "JPEGの高さが65535を超えています")?;
@@ -365,9 +374,20 @@ fn encode_jpeg(
         JpegSampling::S422 => SamplingFactor::R_4_2_2,
         JpegSampling::S420 => SamplingFactor::R_4_2_0,
     });
-    encoder
-        .encode(image.as_raw(), width, height, ColorType::Rgb)
-        .map_err(|e| format!("JPEGエンコードに失敗しました: {e}"))
+    if grayscale {
+        let luminance = image
+            .as_raw()
+            .chunks_exact(3)
+            .map(ink_luminance)
+            .collect::<Vec<_>>();
+        encoder
+            .encode(&luminance, width, height, ColorType::Luma)
+            .map_err(|e| format!("Gray JPEGエンコードに失敗しました: {e}"))
+    } else {
+        encoder
+            .encode(image.as_raw(), width, height, ColorType::Rgb)
+            .map_err(|e| format!("JPEGエンコードに失敗しました: {e}"))
+    }
 }
 
 pub fn convert_to_png(input: &Path, output: &Path) -> Result<PathBuf, String> {

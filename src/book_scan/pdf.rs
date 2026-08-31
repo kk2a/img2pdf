@@ -110,6 +110,16 @@ impl<W: Write + Seek> DirectPdfWriter<W> {
                 .ok_or_else(|| format!("{}のJPEGがありません", page.stem))?;
             let jpeg = fs::read(jpeg_path)
                 .map_err(|e| format!("{}を読めません: {e}", jpeg_path.display()))?;
+            let color_space = match jpeg_components(&jpeg)? {
+                1 => "/DeviceGray",
+                3 => "/DeviceRGB",
+                components => {
+                    return Err(format!(
+                        "未対応のJPEG成分数です: {} components={components}",
+                        jpeg_path.display()
+                    ));
+                }
+            };
             let (width, height) = image::image_dimensions(jpeg_path)
                 .map_err(|e| format!("JPEG寸法を読めません: {e}"))?;
             let placement = if preserve_position {
@@ -127,9 +137,10 @@ impl<W: Write + Seek> DirectPdfWriter<W> {
             self.begin_object(image_id)?;
             write!(
                 self.output,
-                "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+                "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {} /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
                 width,
                 height,
+                color_space,
                 jpeg.len()
             )
             .map_err(|e| format!("PDF image dictionaryを書けません: {e}"))?;
@@ -198,6 +209,20 @@ impl<W: Write + Seek> DirectPdfWriter<W> {
         .map_err(|e| format!("PDF trailerを書けません: {e}"))?;
         Ok(self.output)
     }
+}
+
+fn jpeg_components(jpeg: &[u8]) -> Result<u8, String> {
+    use zune_jpeg::JpegDecoder;
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+
+    let mut decoder = JpegDecoder::new(ZCursor::new(jpeg));
+    decoder
+        .decode_headers()
+        .map_err(|error| format!("JPEG headerを解析できません: {error:?}"))?;
+    decoder
+        .info()
+        .map(|info| info.components)
+        .ok_or_else(|| "JPEG headerに画像情報がありません".to_string())
 }
 
 fn calculate_centered_placement(page: &PageRecord) -> Result<Placement, String> {
@@ -279,6 +304,24 @@ mod tests {
                 .windows(b"/Count 1".len())
                 .any(|part| part == b"/Count 1")
         );
+        let _ = std::fs::remove_file(output);
+        let _ = std::fs::remove_file(jpeg);
+    }
+
+    #[test]
+    fn grayscale_jpeg_uses_device_gray() {
+        let output =
+            std::env::temp_dir().join(format!("img2pdf-grayscale-page-{}.pdf", std::process::id()));
+        let jpeg =
+            std::env::temp_dir().join(format!("img2pdf-grayscale-page-{}.jpg", std::process::id()));
+        image::GrayImage::from_pixel(8, 8, image::Luma([180]))
+            .save(&jpeg)
+            .unwrap();
+        let mut page = record();
+        page.jpeg_path = Some(jpeg.clone());
+        write_pdf(&[page], &output, true).unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        assert!(bytes.windows(11).any(|part| part == b"/DeviceGray"));
         let _ = std::fs::remove_file(output);
         let _ = std::fs::remove_file(jpeg);
     }

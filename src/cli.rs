@@ -259,6 +259,12 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
             None => errors.push(format!("--tone-exclude-pages の値が不正です: {value}")),
         }
     }
+    if let Some(value) = option_value(args, "--grayscale-pages") {
+        match PageRange::parse_list(value) {
+            Some(value) => config.grayscale_pages = value,
+            None => errors.push(format!("--grayscale-pages の値が不正です: {value}")),
+        }
+    }
     if let Some(value) = option_value(args, "--partial-grayscale") {
         match PartialGrayscaleMode::parse(value) {
             Some(value) => config.partial_grayscale = value,
@@ -414,6 +420,7 @@ fn validate_book_option_names(args: &[String], errors: &mut Vec<String>) {
         "--tone-color-global-threshold",
         "--tone-color-tile-threshold",
         "--tone-exclude-pages",
+        "--grayscale-pages",
         "--pre-stroke",
         "--pre-stroke-strength",
         "--jpeg-quality",
@@ -557,6 +564,7 @@ ScanTailor前処理:
   --tone-color-global-threshold <0..1> カラー頁の全体色面積閾値 [0.01]
   --tone-color-tile-threshold <0..1> カラー頁の局所色面積閾値 [0.30]
   --tone-exclude-pages <LIST>    tone/grayを適用しないページ [1]
+  --grayscale-pages <LIST>       指定ページだけ全体を1成分Gray化 [無効]
   --jpeg-quality <1..100>        JPEG品質 [90]
   --jpeg-sampling <444|422|420>  chroma sampling [444]
   --preserve-position <on|off>   A4上の元位置・サイズ保持 [on]

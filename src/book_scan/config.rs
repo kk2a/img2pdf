@@ -195,6 +195,10 @@ pub struct BookScanConfig {
     pub tone_color_tile_threshold: f32,
     #[serde(default = "default_tone_exclude_pages")]
     pub tone_exclude_pages: Vec<PageRange>,
+    /// 明示されたページだけを全体グレースケールの1成分JPEGにする。
+    /// 空なら無効。意図的な色を失わないようAUTOモードは公開しない。
+    #[serde(default)]
+    pub grayscale_pages: Vec<PageRange>,
     #[serde(default)]
     pub pre_stroke_enabled: bool,
     #[serde(default = "default_pre_stroke_strength")]
@@ -261,6 +265,7 @@ impl Default for BookScanConfig {
             tone_color_global_threshold: default_tone_color_global_threshold(),
             tone_color_tile_threshold: default_tone_color_tile_threshold(),
             tone_exclude_pages: default_tone_exclude_pages(),
+            grayscale_pages: Vec::new(),
             pre_stroke_enabled: false,
             pre_stroke_strength: default_pre_stroke_strength(),
             jpeg_quality: 90,
@@ -468,6 +473,12 @@ impl BookScanConfig {
             .any(|range| (range.start..=range.end).contains(&page_number))
     }
 
+    pub fn grayscale_page(&self, page_number: usize) -> bool {
+        self.grayscale_pages
+            .iter()
+            .any(|range| (range.start..=range.end).contains(&page_number))
+    }
+
     /// Real-ESRGANへ渡す倍率。旧設定の0は、出力倍率以上かつ最低x2のauto。
     pub fn resolved_ai_scale(&self) -> u32 {
         if self.superres_ai_scale == 0 {
@@ -532,6 +543,19 @@ mod tests {
         assert_eq!(config.effective_output_scale(), 1);
         assert!(config.tone_boost_enabled);
         assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Auto);
+        assert!(config.grayscale_pages.is_empty());
+    }
+
+    #[test]
+    fn whole_page_grayscale_requires_an_explicit_page() {
+        let config = BookScanConfig {
+            grayscale_pages: PageRange::parse_list("3,8-10").unwrap(),
+            ..BookScanConfig::default()
+        };
+        assert!(!config.grayscale_page(2));
+        assert!(config.grayscale_page(3));
+        assert!(config.grayscale_page(9));
+        assert!(!config.grayscale_page(11));
     }
 
     #[test]
@@ -570,6 +594,7 @@ mod tests {
             "tone_color_global_threshold",
             "tone_color_tile_threshold",
             "tone_exclude_pages",
+            "grayscale_pages",
         ] {
             object.remove(field);
         }
@@ -581,5 +606,6 @@ mod tests {
             config.tone_exclude_pages,
             vec![PageRange { start: 1, end: 1 }]
         );
+        assert!(config.grayscale_pages.is_empty());
     }
 }

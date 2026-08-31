@@ -192,11 +192,16 @@ pub fn show() {
     let mut tone_exclude_pages = Input::new(635, 694, 150, 26, None);
     tone_exclude_pages.set_value(&PageRange::format_list(&saved.tone_exclude_pages));
 
-    let resume = check(25, 735, "中断再開", saved.resume);
-    let keep_work = check(180, 735, "中間画像を保持", saved.keep_work);
-    let preserve_position = check(335, 735, "元位置・サイズを保持", saved.preserve_position);
-    label(25, 775, 100, "作業folder:");
-    let mut work_dir = Input::new(125, 775, 660, 26, None);
+    label(25, 735, 185, "全体gray指定ページ:");
+    let mut grayscale_pages = Input::new(210, 735, 250, 26, None);
+    grayscale_pages.set_value(&PageRange::format_list(&saved.grayscale_pages));
+    label(480, 735, 305, "空欄なら無効（AUTOなし）");
+
+    let resume = check(25, 772, "中断再開", saved.resume);
+    let keep_work = check(180, 772, "中間画像を保持", saved.keep_work);
+    let preserve_position = check(335, 772, "元位置・サイズを保持", saved.preserve_position);
+    label(25, 809, 100, "作業folder:");
+    let mut work_dir = Input::new(125, 809, 660, 26, None);
     if let Some(path) = &saved.work_dir {
         work_dir.set_value(&path.to_string_lossy());
     }
@@ -402,6 +407,8 @@ pub fn show() {
                 tone_color_tile_threshold: parse(&tone_tile_threshold.value(), "局所カラー閾値")?,
                 tone_exclude_pages: PageRange::parse_list(&tone_exclude_pages.value())
                     .ok_or("tone補正の除外ページが不正です")?,
+                grayscale_pages: PageRange::parse_list(&grayscale_pages.value())
+                    .ok_or("全体gray指定ページが不正です")?,
                 pre_stroke_enabled: pre_stroke.value(),
                 pre_stroke_strength: parse(&pre_stroke_strength.value(), "超解像前の線補強")?,
                 jpeg_quality: parse(&jpeg_quality.value(), "JPEG品質")?,
