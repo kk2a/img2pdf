@@ -36,7 +36,7 @@ impl BookScanProcessor {
         progress: F,
     ) -> Result<BookScanReport, String>
     where
-        F: Fn(BookScanProgress),
+        F: Fn(BookScanProgress) + Sync,
     {
         config.validate()?;
         let started = Instant::now();
@@ -124,7 +124,10 @@ impl BookScanProcessor {
                     config.gpu_workers
                 );
             }
-            superres::process(&config, &work_dir, &mut manifest.pages)?;
+            let report_superres = |phase: &str, completed: usize, total: usize| {
+                progress_units(&progress, 3, phase, completed, total);
+            };
+            superres::process(&config, &work_dir, &mut manifest.pages, &report_superres)?;
             manifest.save_atomic(&manifest_path)?;
         }
 
@@ -142,7 +145,10 @@ impl BookScanProcessor {
                 },
                 config.jpeg_quality
             );
-            encode_pages(&config, &work_dir, &mut manifest.pages)?;
+            let report_encoding = |phase: &str, completed: usize, total: usize| {
+                progress_units(&progress, 4, phase, completed, total);
+            };
+            encode_pages(&config, &work_dir, &mut manifest.pages, &report_encoding)?;
             manifest.save_atomic(&manifest_path)?;
         }
 
@@ -181,13 +187,26 @@ impl BookScanProcessor {
 
 fn progress_stage<F>(progress: &F, stage: usize, message: &str)
 where
-    F: Fn(BookScanProgress),
+    F: Fn(BookScanProgress) + Sync,
 {
     progress(BookScanProgress {
         stage,
         total_stages: 5,
         message: message.to_string(),
     });
+}
+
+fn progress_units<F>(progress: &F, stage: usize, phase: &str, completed: usize, total: usize)
+where
+    F: Fn(BookScanProgress) + Sync,
+{
+    if total == 0 {
+        return;
+    }
+    let percentage = completed.saturating_mul(100) / total;
+    let message = format!("{phase}: {completed}/{total} ({percentage}%)");
+    eprintln!("本モード [{stage}/5]: {message}");
+    progress_stage(progress, stage, &message);
 }
 
 fn extract_pages(config: &BookScanConfig, work_dir: &Path) -> Result<Vec<PageRecord>, String> {

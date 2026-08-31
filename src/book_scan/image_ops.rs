@@ -1,5 +1,6 @@
 use super::config::{BookScanConfig, JpegSampling};
 use super::manifest::{BookScanStage, PageRecord};
+use super::progress::{ProgressCallback, ProgressCounter};
 use image::{DynamicImage, RgbImage};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use rayon::prelude::*;
@@ -189,6 +190,7 @@ pub fn encode_pages(
     config: &BookScanConfig,
     work_dir: &Path,
     pages: &mut [PageRecord],
+    progress: &ProgressCallback<'_>,
 ) -> Result<(), String> {
     let output_dir = work_dir.join("jpeg");
     fs::create_dir_all(&output_dir)
@@ -213,6 +215,7 @@ pub fn encode_pages(
         .num_threads(config.cpu_workers)
         .build()
         .map_err(|e| format!("CPU worker poolを作成できません: {e}"))?;
+    let counter = ProgressCounter::new("JPEG化", inputs.len(), progress);
     let results = pool.install(|| {
         inputs
             .par_iter()
@@ -226,6 +229,7 @@ pub fn encode_pages(
                     config.jpeg_quality,
                     config.jpeg_sampling,
                 )?;
+                counter.advance();
                 Ok::<_, String>((*index, output))
             })
             .collect::<Vec<_>>()

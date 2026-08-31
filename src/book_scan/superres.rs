@@ -1,24 +1,28 @@
 use super::config::{BookScanConfig, SuperResolutionMode};
 use super::image_ops::{convert_to_png, prepare_for_superres, save_lanczos};
 use super::manifest::{BookScanStage, PageRecord};
+use super::progress::{ProgressCallback, ProgressCounter};
 use super::scheduler::assign_lpt;
 use super::tools::{find_realesrgan, is_windows_executable, to_windows_path, windows_temp_bridge};
 use rayon::prelude::*;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::mpsc;
+use std::time::Duration;
 
 pub fn process(
     config: &BookScanConfig,
     work_dir: &Path,
     pages: &mut [PageRecord],
+    progress: &ProgressCallback<'_>,
 ) -> Result<(), String> {
     for page in pages.iter_mut().filter(|page| page.is_blank) {
         page.processed_path = None;
         page.stage = BookScanStage::Upscaled;
         page.error = None;
     }
-    let inputs = prepare_inputs(config, work_dir, pages)?;
+    let inputs = prepare_inputs(config, work_dir, pages, progress)?;
     match config.super_resolution {
         SuperResolutionMode::Off => {
             for (index, page) in pages
@@ -31,8 +35,8 @@ pub fn process(
             }
             Ok(())
         }
-        SuperResolutionMode::Lanczos => process_lanczos(config, work_dir, pages, &inputs),
-        SuperResolutionMode::Anime => process_anime(config, work_dir, pages, &inputs),
+        SuperResolutionMode::Lanczos => process_lanczos(config, work_dir, pages, &inputs, progress),
+        SuperResolutionMode::Anime => process_anime(config, work_dir, pages, &inputs, progress),
     }
 }
 
@@ -40,6 +44,7 @@ fn prepare_inputs(
     config: &BookScanConfig,
     work_dir: &Path,
     pages: &[PageRecord],
+    progress: &ProgressCallback<'_>,
 ) -> Result<Vec<Option<std::path::PathBuf>>, String> {
     let needs_preprocessing = config.color_normalization_enabled
         || config.ink_neutralization_enabled
@@ -67,6 +72,8 @@ fn prepare_inputs(
         .num_threads(config.cpu_workers)
         .build()
         .map_err(|e| format!("前処理worker poolを作成できません: {e}"))?;
+    let active_count = pages.iter().filter(|page| !page.is_blank).count();
+    let counter = ProgressCounter::new("背景・文字前処理", active_count, progress);
     let results = pool.install(|| {
         pages
             .par_iter()
@@ -81,7 +88,9 @@ fn prepare_inputs(
                 let output = output_dir.join(format!("{}.png", page.stem));
                 let neutralize_ink = config.ink_neutralization_enabled
                     && !config.ink_neutralization_excluded(page.page_number);
-                prepare_for_superres(input, &output, config, neutralize_ink).map(Some)
+                prepare_for_superres(input, &output, config, neutralize_ink)?;
+                counter.advance();
+                Ok(Some(output))
             })
             .collect::<Vec<_>>()
     });
@@ -93,6 +102,7 @@ fn process_lanczos(
     work_dir: &Path,
     pages: &mut [PageRecord],
     prepared: &[Option<std::path::PathBuf>],
+    progress: &ProgressCallback<'_>,
 ) -> Result<(), String> {
     let output_dir = work_dir.join("ai-output");
     fs::create_dir_all(&output_dir)
@@ -112,12 +122,14 @@ fn process_lanczos(
         .num_threads(config.cpu_workers)
         .build()
         .map_err(|e| format!("CPU worker poolを作成できません: {e}"))?;
+    let counter = ProgressCounter::new("Lanczos拡大", inputs.len(), progress);
     let results = pool.install(|| {
         inputs
             .par_iter()
             .map(|(page_index, input)| {
                 let output = output_dir.join(format!("{}.png", pages[*page_index].stem));
                 save_lanczos(input, &output, config.superres_output_scale)?;
+                counter.advance();
                 Ok::<_, String>((*page_index, output))
             })
             .collect::<Vec<_>>()
@@ -140,6 +152,7 @@ fn process_anime(
     work_dir: &Path,
     pages: &mut [PageRecord],
     prepared: &[Option<std::path::PathBuf>],
+    progress: &ProgressCallback<'_>,
 ) -> Result<(), String> {
     let executable = find_realesrgan(config.realesrgan_path.as_deref()).ok_or_else(|| {
         "realesrgan-ncnn-vulkanが見つかりません。--realesrgan-pathまたはIMG2PDF_REALESRGANを指定してください"
@@ -175,12 +188,15 @@ fn process_anime(
         .num_threads(config.cpu_workers)
         .build()
         .map_err(|e| format!("CPU worker poolを作成できません: {e}"))?;
+    let conversion_counter = ProgressCounter::new("AI入力準備", crop_paths.len(), progress);
     let conversions = pool.install(|| {
         crop_paths
             .par_iter()
             .map(|(page_index, input)| {
                 let output = ai_input.join(format!("{}.png", pages[*page_index].stem));
-                convert_to_png(input, &output).map(|_| (*page_index, output))
+                convert_to_png(input, &output)?;
+                conversion_counter.advance();
+                Ok::<_, String>((*page_index, output))
             })
             .collect::<Vec<_>>()
     });
@@ -216,6 +232,12 @@ fn process_anime(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    let staging_phase = if windows_bridge {
+        "Windows GPUへ転送"
+    } else {
+        "GPU workerへ振り分け"
+    };
+    let staging_counter = ProgressCounter::new(staging_phase, active_indices.len(), progress);
     let mut worker_directories = Vec::new();
     for (worker, assignment) in assignments.iter().enumerate() {
         let input_dir = staging_root.join(format!("worker-{worker}/input"));
@@ -231,6 +253,7 @@ fn process_anime(
                 input_dir.join(format!("{}.png", pages[page_index].stem)),
             )
             .map_err(|e| format!("AI worker入力をコピーできません: {e}"))?;
+            staging_counter.advance();
         }
         worker_directories.push((input_dir, output_dir));
     }
@@ -247,15 +270,17 @@ fn process_anime(
         ));
     }
 
-    let results = std::thread::scope(|scope| {
+    let results = std::thread::scope(|scope| -> Result<Vec<(usize, Output)>, String> {
+        let (sender, receiver) = mpsc::channel();
         let handles = worker_directories
             .iter()
             .enumerate()
             .map(|(worker, (input, output))| {
                 let executable = executable.clone();
                 let model_dir = model_dir.clone();
+                let sender = sender.clone();
                 scope.spawn(move || {
-                    run_batch(
+                    let result = run_batch(
                         &executable,
                         &model_dir,
                         input,
@@ -263,18 +288,45 @@ fn process_anime(
                         config,
                         windows_bridge,
                     )
-                    .map(|result| (worker, result))
+                    .map(|output| (worker, output));
+                    let _ = sender.send(result);
                 })
             })
             .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| "Real-ESRGAN workerがpanicしました".to_string())?
-            })
-            .collect::<Result<Vec<_>, String>>()
+        drop(sender);
+
+        let total = active_indices.len();
+        let report_step = total.div_ceil(20).max(1);
+        let mut last_reported = 0usize;
+        let mut results = Vec::with_capacity(handles.len());
+        while results.len() < handles.len() {
+            match receiver.recv_timeout(Duration::from_secs(1)) {
+                Ok(result) => results.push(result?),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            let generated = count_generated_outputs(&worker_directories);
+            if generated != last_reported
+                && (generated == total || generated.saturating_sub(last_reported) >= report_step)
+            {
+                progress("Real-ESRGAN", generated, total);
+                last_reported = generated;
+            }
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "Real-ESRGAN workerがpanicしました".to_string())?;
+        }
+        if results.len() != worker_directories.len() {
+            return Err("Real-ESRGAN workerが結果を返さず終了しました".to_string());
+        }
+        let generated = count_generated_outputs(&worker_directories);
+        if generated != last_reported {
+            progress("Real-ESRGAN", generated, total);
+        }
+        Ok(results)
     })?;
     for (worker, output) in results {
         let mut bytes = output.stdout;
@@ -285,6 +337,7 @@ fn process_anime(
 
     let mut invalid = Vec::new();
     let inference_scale = config.resolved_ai_scale();
+    let finalize_counter = ProgressCounter::new("AI出力確定", active_indices.len(), progress);
     for (worker, assignment) in assignments.iter().enumerate() {
         for &page_index in assignment {
             let staged = worker_directories[worker]
@@ -362,11 +415,35 @@ fn process_anime(
             pages[page_index].processed_path = Some(output);
             pages[page_index].stage = BookScanStage::Upscaled;
             pages[page_index].error = None;
+            finalize_counter.advance();
         }
     }
 
     drop(staging_guard);
     Ok(())
+}
+
+fn count_generated_outputs(
+    worker_directories: &[(std::path::PathBuf, std::path::PathBuf)],
+) -> usize {
+    worker_directories
+        .iter()
+        .map(|(_, output)| {
+            fs::read_dir(output)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.path().is_file()
+                        && entry
+                            .path()
+                            .extension()
+                            .and_then(|value| value.to_str())
+                            .is_some_and(|value| value.eq_ignore_ascii_case("png"))
+                })
+                .count()
+        })
+        .sum()
 }
 
 struct StagingGuard {

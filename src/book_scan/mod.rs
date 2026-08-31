@@ -6,6 +6,7 @@ mod image_ops;
 mod manifest;
 mod pdf;
 mod pipeline;
+mod progress;
 mod scantailor;
 mod scheduler;
 mod superres;
