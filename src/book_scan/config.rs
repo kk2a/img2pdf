@@ -256,7 +256,7 @@ impl Default for BookScanConfig {
             tile_size: 0,
             gpu_id: -1,
             tta_enabled: false,
-            stroke_enabled: true,
+            stroke_enabled: false,
             stroke_strength: 15,
             tone_boost_enabled: true,
             tone_boost_strength: default_tone_strength(),
@@ -544,6 +544,7 @@ mod tests {
         assert!(config.tone_boost_enabled);
         assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Auto);
         assert!(config.grayscale_pages.is_empty());
+        assert!(!config.stroke_enabled);
     }
 
     #[test]

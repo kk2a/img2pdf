@@ -500,7 +500,7 @@ pub fn print_book_scan_usage() {
 既定プリセット:
   ScanTailor ON / crop ON / 背景正規化 ON / deskew OFF / dewarp OFF
   カラー紙面補正 ON / 黒インク色差補正 OFF
-  animevideov3でAI内部x2、最終画像x1 / GPU worker 4 / tone boost / Minimum 15
+  animevideov3でAI内部x2、最終画像x1 / GPU worker 4 / tone boost / 文字太さ調整OFF
   白黒本文は暗部のみ自動グレースケール化、カラー頁と表紙は自動・手動保護
   JPEG Q90 4:4:4 / A4上の元位置・サイズを保持
   表紙（1ページ目）はcrop除外 / 空白ページの重い処理を省略して元画像を埋め込み
@@ -557,7 +557,7 @@ ScanTailor前処理:
 文字・JPEG:
   --tone-boost <on|off>          本全体の紙・インク基準で階調補正 [on]
   --tone-boost-strength <0..100> 階調補正の強さ [100]
-  --stroke <on|off>              文字太さ調整 [on]
+  --stroke <on|off>              文字太さ調整 [off]
   --stroke-strength <0..100>     Minimum blend率 [15]
   --partial-grayscale <off|auto|force> 暗い文字だけ無彩色化 [auto]
   --partial-grayscale-strength <0..100> 無彩色化の強さ [100]
