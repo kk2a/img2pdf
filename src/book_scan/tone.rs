@@ -89,12 +89,6 @@ pub fn analyze_pages(
         }
     }
     let profile = aggregate_stats(&stats);
-    let monochrome = pages.iter().filter(|page| page.monochrome).count();
-    let excluded = pages.iter().filter(|page| page.excluded).count();
-    let color = pages.len().saturating_sub(monochrome + excluded);
-    eprintln!(
-        "本モード: tone解析 白黒本文 {monochrome} / カラー保護 {color} / 除外・空白 {excluded}ページ"
-    );
     Ok(TonePlan { pages, profile })
 }
 

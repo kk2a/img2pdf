@@ -180,10 +180,6 @@ mod tests {
             "22".to_string(),
             "--tone-boost-strength".to_string(),
             "85".to_string(),
-            "--partial-grayscale".to_string(),
-            "force".to_string(),
-            "--partial-grayscale-strength".to_string(),
-            "70".to_string(),
             "--tone-color-global-threshold".to_string(),
             "0.02".to_string(),
             "--tone-color-tile-threshold".to_string(),
@@ -219,8 +215,7 @@ mod tests {
         assert_eq!(config.gpu_workers, 2);
         assert_eq!(config.stroke_strength, 22);
         assert_eq!(config.tone_boost_strength, 85);
-        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Force);
-        assert_eq!(config.partial_grayscale_strength, 70);
+        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Off);
         assert_eq!(config.tone_color_global_threshold, 0.02);
         assert_eq!(config.tone_color_tile_threshold, 0.4);
         assert_eq!(config.tone_exclude_pages.len(), 2);
@@ -287,6 +282,43 @@ mod tests {
         let error = parse_args(&args).unwrap().parse_error.unwrap();
         assert!(error.contains("--gpu-workers に値がありません"));
         assert!(error.contains("不明なオプションです: --unknown-setting"));
+    }
+
+    #[test]
+    fn test_cli_exposes_only_page_scoped_grayscale() {
+        use img2pdf::book_scan::PartialGrayscaleMode;
+        use img2pdf::cli::{book_scan_usage, parse_args};
+
+        let help = book_scan_usage();
+        assert!(help.contains("--grayscale-pages <LIST>"));
+        assert!(help.contains("1成分Gray"));
+        assert!(!help.contains("--partial-grayscale"));
+
+        let args = vec![
+            "book-scan".to_string(),
+            "/in.pdf".to_string(),
+            "--partial-grayscale".to_string(),
+            "auto".to_string(),
+        ];
+        let parsed = parse_args(&args).unwrap();
+        assert!(
+            parsed
+                .parse_error
+                .unwrap()
+                .contains("不明なオプションです: --partial-grayscale")
+        );
+
+        let args = vec![
+            "book-scan".to_string(),
+            "/in.pdf".to_string(),
+            "--grayscale-pages".to_string(),
+            "2,4-6".to_string(),
+        ];
+        let config = parse_args(&args).unwrap().book_scan.unwrap();
+        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Off);
+        assert!(config.grayscale_page(2));
+        assert!(config.grayscale_page(5));
+        assert!(!config.grayscale_page(3));
     }
 
     // ─── jpegtran 最小疎通 ─────────────────────────────────────────────

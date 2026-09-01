@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,7 +326,7 @@ fn default_tone_strength() -> u8 {
 }
 
 fn default_partial_grayscale() -> PartialGrayscaleMode {
-    PartialGrayscaleMode::Auto
+    PartialGrayscaleMode::Off
 }
 
 fn default_tone_color_global_threshold() -> f32 {
@@ -358,6 +359,12 @@ impl BookScanConfig {
         }
         if self.output_pdf.as_os_str().is_empty() {
             return Err("出力PDFを指定してください".to_string());
+        }
+        if self.partial_grayscale != PartialGrayscaleMode::Off {
+            return Err(
+                "暗部の自動・強制グレースケール化は廃止しました。1成分Grayにするページをgrayscale_pagesで明示してください"
+                    .to_string(),
+            );
         }
         if self.dpi == 0 || self.output_dpi == 0 {
             return Err("DPIには1以上を指定してください".to_string());
@@ -444,12 +451,11 @@ impl BookScanConfig {
                 .and_then(|value| value.to_str())
                 .filter(|value| !value.is_empty())
                 .unwrap_or("output");
-            let parent = self
-                .output_pdf
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or_else(|| std::path::Path::new("."));
-            parent.join(format!(".{stem}-book-work"))
+            let mut hasher = DefaultHasher::new();
+            self.input_path.hash(&mut hasher);
+            self.output_pdf.hash(&mut hasher);
+            let fingerprint = hasher.finish();
+            std::env::temp_dir().join(format!("img2pdf-book-{stem}-{fingerprint:016x}"))
         })
     }
 
@@ -542,7 +548,7 @@ mod tests {
         assert_eq!(config.resolved_ai_scale(), 2);
         assert_eq!(config.effective_output_scale(), 1);
         assert!(config.tone_boost_enabled);
-        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Auto);
+        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Off);
         assert!(config.grayscale_pages.is_empty());
         assert!(!config.stroke_enabled);
     }
@@ -557,6 +563,17 @@ mod tests {
         assert!(config.grayscale_page(3));
         assert!(config.grayscale_page(9));
         assert!(!config.grayscale_page(11));
+    }
+
+    #[test]
+    fn default_work_directory_is_in_the_system_temp_directory() {
+        let config = BookScanConfig {
+            input_path: PathBuf::from("book.pdf"),
+            output_pdf: PathBuf::from("result.pdf"),
+            ..BookScanConfig::default()
+        };
+        assert!(config.resolved_work_dir().starts_with(std::env::temp_dir()));
+        assert_eq!(config.resolved_work_dir(), config.resolved_work_dir());
     }
 
     #[test]
@@ -602,7 +619,7 @@ mod tests {
         let config: BookScanConfig = serde_json::from_value(value).unwrap();
         assert!(config.tone_boost_enabled);
         assert_eq!(config.tone_boost_strength, 100);
-        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Auto);
+        assert_eq!(config.partial_grayscale, PartialGrayscaleMode::Off);
         assert_eq!(
             config.tone_exclude_pages,
             vec![PageRange { start: 1, end: 1 }]

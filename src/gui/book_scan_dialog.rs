@@ -170,17 +170,12 @@ pub fn show() {
     label(195, 657, 80, "強さ:");
     let mut tone_boost_strength = IntInput::new(275, 657, 75, 26, None);
     tone_boost_strength.set_value(&saved.tone_boost_strength.to_string());
-    label(380, 657, 160, "部分グレースケール:");
-    let mut partial_grayscale = Choice::new(540, 657, 125, 26, None);
-    partial_grayscale.add_choice("off|auto|force");
-    partial_grayscale.set_value(match saved.partial_grayscale {
-        PartialGrayscaleMode::Off => 0,
-        PartialGrayscaleMode::Auto => 1,
-        PartialGrayscaleMode::Force => 2,
-    });
-    label(680, 657, 55, "強さ:");
-    let mut partial_grayscale_strength = IntInput::new(735, 657, 50, 26, None);
-    partial_grayscale_strength.set_value(&saved.partial_grayscale_strength.to_string());
+    label(
+        380,
+        657,
+        405,
+        "暗部の自動gray: 無効（全体grayはページ指定）",
+    );
 
     label(25, 694, 145, "全体カラー閾値:");
     let mut tone_global_threshold = FloatInput::new(170, 694, 80, 26, None);
@@ -391,15 +386,8 @@ pub fn show() {
                 stroke_strength: parse(&stroke_strength.value(), "文字太さ")?,
                 tone_boost_enabled: tone_boost.value(),
                 tone_boost_strength: parse(&tone_boost_strength.value(), "tone boostの強さ")?,
-                partial_grayscale: match partial_grayscale.value() {
-                    0 => PartialGrayscaleMode::Off,
-                    2 => PartialGrayscaleMode::Force,
-                    _ => PartialGrayscaleMode::Auto,
-                },
-                partial_grayscale_strength: parse(
-                    &partial_grayscale_strength.value(),
-                    "部分グレースケールの強さ",
-                )?,
+                partial_grayscale: PartialGrayscaleMode::Off,
+                partial_grayscale_strength: 100,
                 tone_color_global_threshold: parse(
                     &tone_global_threshold.value(),
                     "全体カラー閾値",

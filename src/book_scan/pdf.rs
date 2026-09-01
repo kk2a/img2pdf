@@ -20,10 +20,18 @@ pub fn calculate_placement(page: &PageRecord) -> Result<Placement, String> {
     }
     let source_width = page.source_width as f32;
     let source_height = page.source_height as f32;
-    let x = page.restore_x / source_width * A4_WIDTH_PT;
-    let top = page.restore_y / source_height * A4_HEIGHT_PT;
-    let width = page.crop_width as f32 / source_width * A4_WIDTH_PT;
-    let height = page.crop_height as f32 / source_height * A4_HEIGHT_PT;
+    // 元キャンバスをA4へ等比で収め、その座標系の中でcrop位置を復元する。
+    // X/YをA4幅・高さへ別々に正規化すると、A判比でない入力が横または縦に
+    // 引き伸ばされるため、必ず単一のscaleを使う。
+    let scale = (A4_WIDTH_PT / source_width).min(A4_HEIGHT_PT / source_height);
+    let canvas_width = source_width * scale;
+    let canvas_height = source_height * scale;
+    let canvas_x = (A4_WIDTH_PT - canvas_width) * 0.5;
+    let canvas_top = (A4_HEIGHT_PT - canvas_height) * 0.5;
+    let x = canvas_x + page.restore_x * scale;
+    let top = canvas_top + page.restore_y * scale;
+    let width = page.crop_width as f32 * scale;
+    let height = page.crop_height as f32 * scale;
     Ok(Placement {
         x,
         y: A4_HEIGHT_PT - top - height,
@@ -275,6 +283,26 @@ mod tests {
         assert!((placement.x - 71.98).abs() < 0.1);
         assert!((placement.width - 431.9).abs() < 0.2);
         assert!(placement.y > 90.0);
+    }
+
+    #[test]
+    fn placement_never_changes_image_aspect_ratio() {
+        let mut page = record();
+        page.source_width = 1568;
+        page.source_height = 2339;
+        page.crop_width = page.source_width;
+        page.crop_height = page.source_height;
+        page.restore_x = 0.0;
+        page.restore_y = 0.0;
+
+        let placement = calculate_placement(&page).unwrap();
+        assert!((placement.height - A4_HEIGHT_PT).abs() < 0.01);
+        assert!((placement.x - 15.45).abs() < 0.02);
+        assert!(
+            (placement.width / placement.height - page.crop_width as f32 / page.crop_height as f32)
+                .abs()
+                < 0.000_01
+        );
     }
 
     #[test]

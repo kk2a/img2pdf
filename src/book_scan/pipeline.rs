@@ -22,6 +22,8 @@ pub struct BookScanProgress {
     pub stage: usize,
     pub total_stages: usize,
     pub message: String,
+    pub completed: Option<usize>,
+    pub total: Option<usize>,
 }
 
 pub struct BookScanProcessor;
@@ -51,11 +53,12 @@ impl BookScanProcessor {
             && manifest.completed
             && config.output_pdf.is_file()
         {
-            eprintln!("本モード: 完了済みmanifestを確認しました。処理を省略します。");
             progress(BookScanProgress {
                 stage: 5,
                 total_stages: 5,
                 message: "完了済みPDFを確認しました".to_string(),
+                completed: Some(1),
+                total: Some(1),
             });
             return Ok(BookScanReport {
                 page_count: manifest.pages.len(),
@@ -74,21 +77,17 @@ impl BookScanProcessor {
             .filter(|manifest| extracted_pages_valid(&manifest.pages));
         let mut manifest = if let Some(manifest) = reusable {
             progress_stage(&progress, 1, "検証済み入力画像を再利用します");
-            eprintln!("本モード [1/5]: 検証済み入力画像を再利用します");
             manifest
         } else {
             progress_stage(&progress, 1, "入力ページを抽出して空白を判定します");
-            eprintln!("本モード [1/5]: 入力ページを抽出して空白を判定します");
             let mut pages = extract_pages(&config, &work_dir)?;
             let blank_count = blank::classify_pages(&config, &mut pages)?;
             if config.blank_detection_enabled {
-                let numbers = pages
-                    .iter()
-                    .filter(|page| page.is_blank)
-                    .map(|page| page.page_number.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                eprintln!("本モード: 空白ページ {blank_count}枚 [{}]", numbers);
+                progress_stage(
+                    &progress,
+                    1,
+                    &format!("入力抽出完了（空白{blank_count}ページ）"),
+                );
             }
             BookScanManifest::new(config.clone(), pages)
         };
@@ -96,32 +95,28 @@ impl BookScanProcessor {
 
         if crop_pages_valid(&manifest.pages) {
             progress_stage(&progress, 2, "ScanTailor出力を再利用します");
-            eprintln!("本モード [2/5]: 検証済みScanTailor出力を再利用します");
         } else {
             progress_stage(&progress, 2, "ScanTailor前処理を実行します");
-            eprintln!("本モード [2/5]: ScanTailor前処理を実行します");
             scantailor::process(&config, &work_dir, &mut manifest.pages)?;
             manifest.save_atomic(&manifest_path)?;
         }
 
         if processed_pages_valid(&config, &manifest.pages) {
             progress_stage(&progress, 3, "超解像出力を再利用します");
-            eprintln!("本モード [3/5]: 検証済み超解像出力を再利用します");
         } else {
-            progress_stage(
-                &progress,
-                3,
-                &format!("{:?} 超解像を実行します", config.super_resolution),
-            );
             if config.super_resolution == super::SuperResolutionMode::Off {
-                eprintln!("本モード [3/5]: 超解像はOFFです");
+                progress_stage(&progress, 3, "超解像はOFFです");
             } else {
-                eprintln!(
-                    "本モード [3/5]: {:?}（AI内部 x{} → 最終画像 x{}, GPU worker {}）を実行します",
-                    config.super_resolution,
-                    config.resolved_ai_scale(),
-                    config.effective_output_scale(),
-                    config.gpu_workers
+                progress_stage(
+                    &progress,
+                    3,
+                    &format!(
+                        "{:?} AI x{} → 出力x{}（GPU worker {}）",
+                        config.super_resolution,
+                        config.resolved_ai_scale(),
+                        config.effective_output_scale(),
+                        config.gpu_workers
+                    ),
                 );
             }
             let report_superres = |phase: &str, completed: usize, total: usize| {
@@ -133,28 +128,16 @@ impl BookScanProcessor {
 
         if encoded_pages_valid(&config, &manifest.pages) {
             progress_stage(&progress, 4, "JPEGを再利用します");
-            eprintln!("本モード [4/5]: 検証済みJPEGを再利用します");
         } else {
             progress_stage(&progress, 4, "階調・文字色・太さ調整とJPEG化を実行します");
-            eprintln!(
-                "本モード [4/5]: tone boost {} / 部分gray {:?} / 文字太さ {} / JPEG quality {}を実行します",
-                if config.tone_boost_enabled {
-                    config.tone_boost_strength.to_string()
-                } else {
-                    "OFF".to_string()
-                },
-                config.partial_grayscale,
-                if config.stroke_enabled {
-                    config.stroke_strength.to_string()
-                } else {
-                    "OFF".to_string()
-                },
-                config.jpeg_quality
-            );
             if !config.grayscale_pages.is_empty() {
-                eprintln!(
-                    "本モード [4/5]: 指定ページ [{}] を全体grayの1成分JPEGにします",
-                    PageRange::format_list(&config.grayscale_pages)
+                progress_stage(
+                    &progress,
+                    4,
+                    &format!(
+                        "指定ページ [{}] を1成分Gray化",
+                        PageRange::format_list(&config.grayscale_pages)
+                    ),
                 );
             }
             let report_encoding = |phase: &str, completed: usize, total: usize| {
@@ -165,14 +148,6 @@ impl BookScanProcessor {
         }
 
         progress_stage(&progress, 5, "A4 PDFへ書き出します");
-        eprintln!(
-            "本モード [5/5]: {}でA4 PDFへ書き出します",
-            if config.preserve_position {
-                "元位置・サイズ保持"
-            } else {
-                "crop画像の中央最大配置"
-            }
-        );
         pdf::write_pdf(
             &manifest.pages,
             &config.output_pdf,
@@ -205,6 +180,8 @@ where
         stage,
         total_stages: 5,
         message: message.to_string(),
+        completed: None,
+        total: None,
     });
 }
 
@@ -217,8 +194,13 @@ where
     }
     let percentage = completed.saturating_mul(100) / total;
     let message = format!("{phase}: {completed}/{total} ({percentage}%)");
-    eprintln!("本モード [{stage}/5]: {message}");
-    progress_stage(progress, stage, &message);
+    progress(BookScanProgress {
+        stage,
+        total_stages: 5,
+        message,
+        completed: Some(completed),
+        total: Some(total),
+    });
 }
 
 fn extract_pages(config: &BookScanConfig, work_dir: &Path) -> Result<Vec<PageRecord>, String> {

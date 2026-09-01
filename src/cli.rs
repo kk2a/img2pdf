@@ -12,16 +12,17 @@
 //! ```
 
 use crate::book_scan::{
-    BookScanConfig, BookScanProcessor, JpegSampling, PageRange, PartialGrayscaleMode,
+    BookScanConfig, BookScanProcessor, BookScanProgress, JpegSampling, PageRange,
     SuperResolutionMode,
 };
 use crate::image_processor::ImageProcessor;
 use crate::models::{ProcessingError, ProcessingResult, ProgressPhase, ProgressUpdate};
 use crate::pdf2img_processor::{OutputImageFormat, Pdf2ImgProcessor};
 use crate::utils::constants::DEFAULT_WIDTH;
-use std::io::{self, Write};
+use std::fmt::Write as FmtWrite;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// CLI 動作モード
@@ -45,6 +46,379 @@ pub struct CliArgs {
     pub book_scan: Option<BookScanConfig>,
     pub parse_error: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BookOptionSection {
+    Page,
+    Blank,
+    ScanTailor,
+    SuperResolution,
+    ToneAndJpeg,
+    Shortcut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BookOptionArity {
+    Value,
+    OptionalValue,
+    Flag,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BookOptionSpec {
+    name: &'static str,
+    value: &'static str,
+    arity: BookOptionArity,
+    section: BookOptionSection,
+    description: &'static str,
+    default: &'static str,
+}
+
+macro_rules! value_option {
+    ($name:literal, $value:literal, $section:ident, $description:literal, $default:literal) => {
+        BookOptionSpec {
+            name: $name,
+            value: $value,
+            arity: BookOptionArity::Value,
+            section: BookOptionSection::$section,
+            description: $description,
+            default: $default,
+        }
+    };
+}
+
+macro_rules! flag_option {
+    ($name:literal, $section:ident, $description:literal) => {
+        BookOptionSpec {
+            name: $name,
+            value: "",
+            arity: BookOptionArity::Flag,
+            section: BookOptionSection::$section,
+            description: $description,
+            default: "",
+        }
+    };
+}
+
+const BOOK_OPTIONS: &[BookOptionSpec] = &[
+    value_option!(
+        "--pages",
+        "<N|START-END>",
+        Page,
+        "処理対象ページ",
+        "全ページ"
+    ),
+    value_option!(
+        "--work-dir",
+        "<PATH>",
+        Page,
+        "作業フォルダ",
+        "$TMPDIR/img2pdf-book-..."
+    ),
+    value_option!("--resume", "<on|off>", Page, "検証済み段階を再利用", "on"),
+    BookOptionSpec {
+        name: "--keep-work",
+        value: "[on|off]",
+        arity: BookOptionArity::OptionalValue,
+        section: BookOptionSection::Page,
+        description: "成功後も中間画像を保持",
+        default: "off",
+    },
+    value_option!(
+        "--blank-detection",
+        "<on|off>",
+        Blank,
+        "保守的な空白判定",
+        "on"
+    ),
+    value_option!(
+        "--blank-dark-delta",
+        "<1..255>",
+        Blank,
+        "背景から暗部とみなす差",
+        "25"
+    ),
+    value_option!(
+        "--blank-max-dark-ratio",
+        "<0..0.1>",
+        Blank,
+        "空白とみなす最大暗部比率",
+        "0.0005"
+    ),
+    value_option!(
+        "--blank-edge-threshold",
+        "<1..255>",
+        Blank,
+        "エッジの輝度差",
+        "12"
+    ),
+    value_option!(
+        "--blank-max-edge-ratio",
+        "<0..0.1>",
+        Blank,
+        "空白とみなす最大エッジ比率",
+        "0.0005"
+    ),
+    value_option!(
+        "--scantailor",
+        "<on|off>",
+        ScanTailor,
+        "ScanTailor全体",
+        "on"
+    ),
+    value_option!("--crop", "<on|off>", ScanTailor, "ページ領域検出", "on"),
+    value_option!(
+        "--crop-exclude-pages",
+        "<LIST>",
+        ScanTailor,
+        "cropしないページ（例: 1,10-12）",
+        "1"
+    ),
+    value_option!(
+        "--normalize",
+        "<on|off>",
+        ScanTailor,
+        "背景照明正規化",
+        "on"
+    ),
+    value_option!(
+        "--color-normalize",
+        "<on|off>",
+        ScanTailor,
+        "RGBのカラー紙面補正",
+        "on"
+    ),
+    value_option!(
+        "--color-normalize-strength",
+        "<0..100>",
+        ScanTailor,
+        "カラー紙面補正の強さ",
+        "100"
+    ),
+    value_option!(
+        "--color-normalize-radius",
+        "<1..256>",
+        ScanTailor,
+        "背景推定半径",
+        "40"
+    ),
+    value_option!(
+        "--ink-neutralize",
+        "<on|off>",
+        ScanTailor,
+        "黒文字近傍だけ色差を除去",
+        "off"
+    ),
+    value_option!(
+        "--ink-neutralize-strength",
+        "<0..100>",
+        ScanTailor,
+        "黒インク補正の強さ",
+        "100"
+    ),
+    value_option!(
+        "--ink-neutralize-exclude-pages",
+        "<LIST>",
+        ScanTailor,
+        "黒インク補正をしないページ",
+        "1"
+    ),
+    value_option!("--deskew", "<on|off>", ScanTailor, "傾き補正", "off"),
+    value_option!("--dewarp", "<on|off>", ScanTailor, "湾曲補正", "off"),
+    value_option!("--margins", "<NUMBER>", ScanTailor, "余白", "0"),
+    value_option!("--dpi", "<NUMBER>", ScanTailor, "入力DPI", "300"),
+    value_option!("--output-dpi", "<NUMBER>", ScanTailor, "出力DPI", "300"),
+    value_option!("--despeckle", "<1.0..3.0>", ScanTailor, "ノイズ除去", "1.0"),
+    value_option!(
+        "--page-detection-tolerance",
+        "<0..1>",
+        ScanTailor,
+        "ページ検出許容値",
+        "0.1"
+    ),
+    value_option!(
+        "--scantailor-path",
+        "<PATH>",
+        ScanTailor,
+        "scantailor-cliの明示パス",
+        "自動検出"
+    ),
+    value_option!(
+        "--superres",
+        "<off|anime|lanczos>",
+        SuperResolution,
+        "超解像方式",
+        "anime"
+    ),
+    value_option!(
+        "--output-scale",
+        "<1..4>",
+        SuperResolution,
+        "最終画像の画素倍率",
+        "1"
+    ),
+    value_option!(
+        "--ai-scale",
+        "<2..4>",
+        SuperResolution,
+        "Real-ESRGAN内部倍率",
+        "2"
+    ),
+    value_option!(
+        "--scale",
+        "<1..4>",
+        SuperResolution,
+        "--output-scaleの旧名",
+        "1"
+    ),
+    value_option!(
+        "--inference-scale",
+        "<2..4>",
+        SuperResolution,
+        "--ai-scaleの旧名",
+        "2"
+    ),
+    value_option!(
+        "--model",
+        "<NAME>",
+        SuperResolution,
+        "Real-ESRGAN model",
+        "realesr-animevideov3"
+    ),
+    value_option!(
+        "--gpu-workers",
+        "<1..8>",
+        SuperResolution,
+        "GPUプロセス数",
+        "4"
+    ),
+    value_option!(
+        "--cpu-workers",
+        "<1..64>",
+        SuperResolution,
+        "CPU後処理worker数",
+        "2"
+    ),
+    value_option!(
+        "--tile",
+        "<NUMBER>",
+        SuperResolution,
+        "ncnn tile size（0はauto）",
+        "0"
+    ),
+    value_option!(
+        "--gpu-id",
+        "<NUMBER>",
+        SuperResolution,
+        "GPU ID（-1はauto）",
+        "-1"
+    ),
+    value_option!("--tta", "<on|off>", SuperResolution, "TTA", "off"),
+    value_option!(
+        "--realesrgan-path",
+        "<PATH>",
+        SuperResolution,
+        "realesrgan-ncnn-vulkanの明示パス",
+        "自動検出"
+    ),
+    value_option!(
+        "--model-dir",
+        "<PATH>",
+        SuperResolution,
+        "modelフォルダ",
+        "実行ファイル隣接"
+    ),
+    value_option!(
+        "--pre-stroke",
+        "<on|off>",
+        SuperResolution,
+        "超解像前の線補強",
+        "off"
+    ),
+    value_option!(
+        "--pre-stroke-strength",
+        "<0..100>",
+        SuperResolution,
+        "超解像前Minimum blend率",
+        "5"
+    ),
+    value_option!(
+        "--tone-boost",
+        "<on|off>",
+        ToneAndJpeg,
+        "紙・インク基準の階調補正",
+        "on"
+    ),
+    value_option!(
+        "--tone-boost-strength",
+        "<0..100>",
+        ToneAndJpeg,
+        "階調補正の強さ",
+        "100"
+    ),
+    value_option!("--stroke", "<on|off>", ToneAndJpeg, "文字太さ調整", "off"),
+    value_option!(
+        "--stroke-strength",
+        "<0..100>",
+        ToneAndJpeg,
+        "Minimum blend率",
+        "15"
+    ),
+    value_option!(
+        "--tone-color-global-threshold",
+        "<0..1>",
+        ToneAndJpeg,
+        "tone boost用の全体色面積閾値",
+        "0.01"
+    ),
+    value_option!(
+        "--tone-color-tile-threshold",
+        "<0..1>",
+        ToneAndJpeg,
+        "tone boost用の局所色面積閾値",
+        "0.30"
+    ),
+    value_option!(
+        "--tone-exclude-pages",
+        "<LIST>",
+        ToneAndJpeg,
+        "tone boostを適用しないページ",
+        "1"
+    ),
+    value_option!(
+        "--grayscale-pages",
+        "<LIST>",
+        ToneAndJpeg,
+        "指定ページだけ全体を1成分Gray化",
+        "無効"
+    ),
+    value_option!("--jpeg-quality", "<1..100>", ToneAndJpeg, "JPEG品質", "90"),
+    value_option!(
+        "--jpeg-sampling",
+        "<444|422|420>",
+        ToneAndJpeg,
+        "chroma sampling",
+        "444"
+    ),
+    value_option!(
+        "--preserve-position",
+        "<on|off>",
+        ToneAndJpeg,
+        "A4上で元位置・等倍比を保持",
+        "on"
+    ),
+    flag_option!("--no-scantailor", Shortcut, "ScanTailor全体を無効化"),
+    flag_option!("--no-blank-detection", Shortcut, "空白判定を無効化"),
+    flag_option!("--no-crop", Shortcut, "cropを無効化"),
+    flag_option!("--no-normalize", Shortcut, "背景照明正規化を無効化"),
+    flag_option!("--no-color-normalize", Shortcut, "カラー紙面補正を無効化"),
+    flag_option!("--no-ink-neutralize", Shortcut, "黒インク補正を無効化"),
+    flag_option!("--no-tone-boost", Shortcut, "tone boostを無効化"),
+    flag_option!("--no-stroke", Shortcut, "文字太さ調整を無効化"),
+    flag_option!("--no-resume", Shortcut, "中断再開を無効化"),
+    flag_option!("--max-performance", Shortcut, "最大性能モード"),
+    flag_option!("--no-max-performance", Shortcut, "最大性能モードを無効化"),
+];
 
 /// コマンドライン引数を解析する
 ///
@@ -157,7 +531,7 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
             if let Some(value) = option_value(args, $name) {
                 match value.parse::<$type>() {
                     Ok(value) => config.$field = value,
-                    Err(_) => errors.push(format!("{} の値が不正です: {}", $name, value)),
+                    Err(_) => errors.push(book_option_value_error($name, value)),
                 }
             }
         };
@@ -167,7 +541,7 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
             if let Some(value) = option_value(args, $name) {
                 match parse_on_off(value) {
                     Some(value) => config.$field = value,
-                    None => errors.push(format!("{} にはon/offを指定してください: {}", $name, value)),
+                    None => errors.push(book_option_value_error($name, value)),
                 }
             }
         };
@@ -216,11 +590,6 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
     number!("--stroke-strength", stroke_strength, u8);
     number!("--tone-boost-strength", tone_boost_strength, u8);
     number!(
-        "--partial-grayscale-strength",
-        partial_grayscale_strength,
-        u8
-    );
-    number!(
         "--tone-color-global-threshold",
         tone_color_global_threshold,
         f32
@@ -263,14 +632,6 @@ fn parse_book_scan_args(args: &[String]) -> Option<CliArgs> {
         match PageRange::parse_list(value) {
             Some(value) => config.grayscale_pages = value,
             None => errors.push(format!("--grayscale-pages の値が不正です: {value}")),
-        }
-    }
-    if let Some(value) = option_value(args, "--partial-grayscale") {
-        match PartialGrayscaleMode::parse(value) {
-            Some(value) => config.partial_grayscale = value,
-            None => errors.push(format!(
-                "--partial-grayscale にはoff/auto/forceを指定してください: {value}"
-            )),
         }
     }
     if let Some(value) = option_value(args, "--superres") {
@@ -362,6 +723,16 @@ fn option_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
         })
 }
 
+fn book_option_value_error(name: &str, value: &str) -> String {
+    let expected = BOOK_OPTIONS
+        .iter()
+        .find(|spec| spec.name == name)
+        .map(|spec| spec.value)
+        .filter(|expected| !expected.is_empty())
+        .unwrap_or("有効な値");
+    format!("{name} の値が不正です: {value}（期待: {expected}）")
+}
+
 fn parse_on_off(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {
         "on" | "true" | "yes" | "1" => Some(true),
@@ -371,77 +742,6 @@ fn parse_on_off(value: &str) -> Option<bool> {
 }
 
 fn validate_book_option_names(args: &[String], errors: &mut Vec<String>) {
-    const VALUE_OPTIONS: &[&str] = &[
-        "--pages",
-        "--work-dir",
-        "--resume",
-        "--blank-detection",
-        "--blank-dark-delta",
-        "--blank-max-dark-ratio",
-        "--blank-edge-threshold",
-        "--blank-max-edge-ratio",
-        "--scantailor",
-        "--crop",
-        "--crop-exclude-pages",
-        "--normalize",
-        "--color-normalize",
-        "--color-normalize-strength",
-        "--color-normalize-radius",
-        "--ink-neutralize",
-        "--ink-neutralize-strength",
-        "--ink-neutralize-exclude-pages",
-        "--deskew",
-        "--dewarp",
-        "--margins",
-        "--dpi",
-        "--output-dpi",
-        "--despeckle",
-        "--page-detection-tolerance",
-        "--scantailor-path",
-        "--superres",
-        "--scale",
-        "--inference-scale",
-        "--output-scale",
-        "--ai-scale",
-        "--model",
-        "--gpu-workers",
-        "--cpu-workers",
-        "--tile",
-        "--gpu-id",
-        "--tta",
-        "--realesrgan-path",
-        "--model-dir",
-        "--stroke",
-        "--stroke-strength",
-        "--tone-boost",
-        "--tone-boost-strength",
-        "--partial-grayscale",
-        "--partial-grayscale-strength",
-        "--tone-color-global-threshold",
-        "--tone-color-tile-threshold",
-        "--tone-exclude-pages",
-        "--grayscale-pages",
-        "--pre-stroke",
-        "--pre-stroke-strength",
-        "--jpeg-quality",
-        "--jpeg-sampling",
-        "--preserve-position",
-    ];
-    const FLAGS: &[&str] = &[
-        "--keep-work",
-        "--no-scantailor",
-        "--no-blank-detection",
-        "--no-crop",
-        "--no-normalize",
-        "--no-color-normalize",
-        "--no-ink-neutralize",
-        "--no-stroke",
-        "--no-tone-boost",
-        "--no-resume",
-        "--max-performance",
-        "--no-max-performance",
-    ];
-
     for (index, argument) in args.iter().enumerate() {
         if !argument.starts_with("--") {
             continue;
@@ -449,17 +749,20 @@ fn validate_book_option_names(args: &[String], errors: &mut Vec<String>) {
         let name = argument
             .split_once('=')
             .map_or(argument.as_str(), |pair| pair.0);
-        if !VALUE_OPTIONS.contains(&name) && !FLAGS.contains(&name) {
+        let Some(spec) = BOOK_OPTIONS.iter().find(|spec| spec.name == name) else {
             errors.push(format!("不明なオプションです: {name}"));
             continue;
+        };
+        if spec.arity == BookOptionArity::Flag && argument.contains('=') {
+            errors.push(format!("{name} は値を取りません"));
         }
-        if VALUE_OPTIONS.contains(&name)
+        if spec.arity == BookOptionArity::Value
             && !argument.contains('=')
             && args
                 .get(index + 1)
                 .is_none_or(|value| value.starts_with("--"))
         {
-            errors.push(format!("{name} に値がありません"));
+            errors.push(format!("{name} に値がありません（期待: {}）", spec.value));
         }
     }
 }
@@ -493,90 +796,44 @@ pub fn print_pdf2img_usage() {
 
 /// 本モードのヘルプを表示する。
 pub fn print_book_scan_usage() {
-    eprintln!(
-        r#"使用方法:
-  img2pdf book-scan <input.pdf|image_folder> [output.pdf] [options]
+    eprint!("{}", book_scan_usage());
+}
 
-既定プリセット:
-  ScanTailor ON / crop ON / 背景正規化 ON / deskew OFF / dewarp OFF
-  カラー紙面補正 ON / 黒インク色差補正 OFF
-  animevideov3でAI内部x2、最終画像x1 / GPU worker 4 / tone boost / 文字太さ調整OFF
-  白黒本文は暗部のみ自動グレースケール化、カラー頁と表紙は自動・手動保護
-  JPEG Q90 4:4:4 / A4上の元位置・サイズを保持
-  表紙（1ページ目）はcrop除外 / 空白ページの重い処理を省略して元画像を埋め込み
-
-ページ・作業:
-  --pages <N|START-END>          対象ページ
-  --work-dir <path>              作業フォルダ
-  --resume <on|off>              検証済み段階を再利用 [on]
-  --keep-work [on|off]           成功後も中間画像を保持 [off]
-
-空白ページ:
-  --blank-detection <on|off>     保守的な空白判定 [on]
-  --blank-dark-delta <1..255>    背景から暗部とみなす差 [25]
-  --blank-max-dark-ratio <0..0.1> 空白とみなす最大暗部比率 [0.0005]
-  --blank-edge-threshold <1..255> エッジの輝度差 [12]
-  --blank-max-edge-ratio <0..0.1> 空白とみなす最大エッジ比率 [0.0005]
-
-ScanTailor前処理:
-  --scantailor <on|off>          ScanTailor全体 [on]
-  --crop <on|off>                ページ領域検出 [on]
-  --crop-exclude-pages <LIST>    cropしないページ（例: 1,158,10-12）[1]
-  --normalize <on|off>           背景照明正規化 [on]
-  --color-normalize <on|off>     RGBのカラー紙面補正 [on]
-  --color-normalize-strength <0..100> 紙面補正の強さ [100]
-  --color-normalize-radius <1..256> 背景推定半径 [40]
-  --ink-neutralize <on|off>      黒文字近傍だけ色差を除去 [off]
-  --ink-neutralize-strength <0..100> 黒インク補正の強さ [100]
-  --ink-neutralize-exclude-pages <LIST> 補正しないページ [1]
-  --deskew <on|off>              傾き補正 [off]
-  --dewarp <on|off>              湾曲補正 [off]
-  --margins <number>             余白 [0]
-  --dpi <number>                 入力DPI [300]
-  --output-dpi <number>          出力DPI [300]
-  --despeckle <1.0..3.0>         ノイズ除去 [1.0]
-  --page-detection-tolerance <0..1> ページ検出許容値 [0.1]
-  --scantailor-path <path>       scantailor-cliの明示パス
-
-超解像:
-  --superres <off|anime|lanczos> 方式 [anime]
-  --output-scale <1..4>          最終画像の画素倍率 [1]
-  --ai-scale <2..4>              Real-ESRGAN内部倍率 [2]
-  --scale / --inference-scale    上記2項目の旧名（互換用）
-  --model <name>                 Real-ESRGAN model [realesr-animevideov3]
-  --gpu-workers <1..8>           GPUプロセス数 [4]
-  --cpu-workers <1..64>          CPU後処理worker数 [2]
-  --tile <number>                ncnn tile size、0はauto [0]
-  --gpu-id <number>              GPU ID、-1はauto [-1]
-  --tta <on|off>                 TTA [off]
-  --realesrgan-path <path>       realesrgan-ncnn-vulkanの明示パス
-  --model-dir <path>             modelフォルダ
-  --pre-stroke <on|off>          超解像前の線補強 [off]
-  --pre-stroke-strength <0..100> 超解像前Minimum blend率 [5]
-
-文字・JPEG:
-  --tone-boost <on|off>          本全体の紙・インク基準で階調補正 [on]
-  --tone-boost-strength <0..100> 階調補正の強さ [100]
-  --stroke <on|off>              文字太さ調整 [off]
-  --stroke-strength <0..100>     Minimum blend率 [15]
-  --partial-grayscale <off|auto|force> 暗い文字だけ無彩色化 [auto]
-  --partial-grayscale-strength <0..100> 無彩色化の強さ [100]
-  --tone-color-global-threshold <0..1> カラー頁の全体色面積閾値 [0.01]
-  --tone-color-tile-threshold <0..1> カラー頁の局所色面積閾値 [0.30]
-  --tone-exclude-pages <LIST>    tone/grayを適用しないページ [1]
-  --grayscale-pages <LIST>       指定ページだけ全体を1成分Gray化 [無効]
-  --jpeg-quality <1..100>        JPEG品質 [90]
-  --jpeg-sampling <444|422|420>  chroma sampling [444]
-  --preserve-position <on|off>   A4上の元位置・サイズ保持 [on]
-
-短縮flag:
-  --no-scantailor --no-blank-detection --no-crop --no-normalize
-  --no-color-normalize --no-ink-neutralize --no-tone-boost --no-stroke --no-resume
-
-環境変数:
-  IMG2PDF_SCANTAILOR / IMG2PDF_REALESRGAN
-"#
+/// オプション仕様表から本モードhelpを生成する。
+pub fn book_scan_usage() -> String {
+    let mut output = String::from(
+        "使用方法:\n  img2pdf book-scan <input.pdf|image_folder> [output.pdf] [options]\n\n\
+既定プリセット:\n  ScanTailor/crop/背景正規化/tone boost ON、deskew/dewarp/stroke OFF\n  Anime AI内部x2 → 最終x1、JPEG Q90 4:4:4、A4上で元位置と縦横比を保持\n  自動グレースケールは無効。1成分Grayは --grayscale-pages で明示したページだけ\n  表紙はcrop除外、空白ページは元画像を埋め込み\n",
     );
+    let sections = [
+        (BookOptionSection::Page, "ページ・作業"),
+        (BookOptionSection::Blank, "空白ページ"),
+        (BookOptionSection::ScanTailor, "ScanTailor前処理"),
+        (BookOptionSection::SuperResolution, "超解像"),
+        (BookOptionSection::ToneAndJpeg, "文字・階調・JPEG"),
+        (BookOptionSection::Shortcut, "短縮flag"),
+    ];
+    for (section, title) in sections {
+        let _ = writeln!(output, "\n{title}:");
+        for spec in BOOK_OPTIONS.iter().filter(|spec| spec.section == section) {
+            let signature = if spec.value.is_empty() {
+                spec.name.to_string()
+            } else {
+                format!("{} {}", spec.name, spec.value)
+            };
+            let default = if spec.default.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", spec.default)
+            };
+            let _ = writeln!(output, "  {signature:<42} {}{default}", spec.description);
+        }
+    }
+    output.push_str(
+        "\nページLIST形式:\n  1,9,20-22 のように1始まりで指定。0、逆順、空要素はエラー\n\n\
+環境変数:\n  IMG2PDF_SCANTAILOR / IMG2PDF_REALESRGAN\n",
+    );
+    output
 }
 
 /// 既定の出力先 `output-[seed].pdf` を現在ディレクトリに生成する
@@ -636,7 +893,16 @@ fn run_book_scan(args: &CliArgs) -> ProcessingResult {
     let Some(config) = args.book_scan.clone() else {
         return failed_result(&args.output_path, "book-scan", "本モード設定がありません");
     };
-    match BookScanProcessor::run(config) {
+    let display = Mutex::new(CliBookProgress::new());
+    let result = BookScanProcessor::run_with_progress(config, |update| {
+        if let Ok(mut display) = display.lock() {
+            display.render(&update);
+        }
+    });
+    if let Ok(mut display) = display.lock() {
+        display.finish(result.is_ok());
+    }
+    match result {
         Ok(report) => {
             eprintln!(
                 "本モード完了: {}ページ（空白{}ページ）、作業フォルダ: {}、{:.2}秒",
@@ -654,6 +920,70 @@ fn run_book_scan(args: &CliArgs) -> ProcessingResult {
             }
         }
         Err(error) => failed_result(&args.output_path, &args.input_folder, &error),
+    }
+}
+
+struct CliBookProgress {
+    interactive: bool,
+    last_stage: Option<usize>,
+}
+
+impl CliBookProgress {
+    const BAR_WIDTH: usize = 24;
+
+    fn new() -> Self {
+        Self {
+            interactive: io::stderr().is_terminal(),
+            last_stage: None,
+        }
+    }
+
+    fn render(&mut self, update: &BookScanProgress) {
+        if self.interactive {
+            let within_stage = match (update.completed, update.total) {
+                (Some(completed), Some(total)) if total > 0 => {
+                    completed.min(total) as f32 / total as f32
+                }
+                _ => 0.0,
+            };
+            let overall = ((update.stage.saturating_sub(1)) as f32 + within_stage)
+                / update.total_stages.max(1) as f32;
+            let filled = (overall * Self::BAR_WIDTH as f32).round() as usize;
+            let bar = format!(
+                "{}{}",
+                "=".repeat(filled.min(Self::BAR_WIDTH)),
+                " ".repeat(Self::BAR_WIDTH.saturating_sub(filled))
+            );
+            eprint!(
+                "\r\x1b[2K本モード [{bar}] {:>3}% [{}/{}] {}",
+                (overall * 100.0).round() as usize,
+                update.stage,
+                update.total_stages,
+                update.message
+            );
+            let _ = io::stderr().flush();
+        } else if self.last_stage != Some(update.stage) {
+            eprintln!(
+                "本モード [{}/{}]: {}",
+                update.stage, update.total_stages, update.message
+            );
+        }
+        self.last_stage = Some(update.stage);
+    }
+
+    fn finish(&mut self, success: bool) {
+        if !self.interactive {
+            return;
+        }
+        if success {
+            eprint!(
+                "\r\x1b[2K本モード [{}] 100% 完了\n",
+                "=".repeat(Self::BAR_WIDTH)
+            );
+        } else {
+            eprint!("\n");
+        }
+        let _ = io::stderr().flush();
     }
 }
 
