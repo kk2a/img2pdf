@@ -1,3 +1,5 @@
 /target
 /input-output
 /.work
+__pycache__/
+*.py[cod]
