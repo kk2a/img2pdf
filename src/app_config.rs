@@ -1,3 +1,4 @@
+use crate::book_scan::BookScanConfig;
 use crate::models::Config;
 use crate::utils::paths;
 use anyhow::Result;
@@ -59,5 +60,13 @@ impl AppConfig {
     /// 最後に使用した保存ディレクトリを更新する
     pub fn set_last_save_dir(&mut self, dir: String) {
         self.data.last_save_dir = dir;
+    }
+
+    pub fn get_book_scan_config(&self) -> Option<&BookScanConfig> {
+        self.data.book_scan.as_ref()
+    }
+
+    pub fn set_book_scan_config(&mut self, config: BookScanConfig) {
+        self.data.book_scan = Some(config);
     }
 }
